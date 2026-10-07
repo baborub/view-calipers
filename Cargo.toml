@@ -1,0 +1,34 @@
+[package]
+name = "view-calipers"
+version = "0.1.0"
+edition = "2021"
+description = "Windows media browser with dual panes, tabs, and previews for images, video, documents, comics, and 3D."
+license = "MIT"
+repository = "https://github.com/baborub/view-calipers"
+readme = "README.md"
+publish = false
+
+[dependencies]
+eframe = "0.29"
+egui = "0.29"
+image = "0.25"
+zip = { version = "2", default-features = false, features = ["deflate", "bzip2", "zstd", "lzma"] }
+sevenz-rust = { version = "0.6", optional = true }
+rfd = "0.15"
+anyhow = "1"
+unrar = "0.5.8"
+egui_commonmark = { version = "0.18.0", default-features = false, features = ["pulldown_cmark"] }
+windows = { version = "0.58", features = ["Data_Pdf", "Storage", "Storage_Streams", "Foundation", "Win32_System_WinRT"] }
+
+[features]
+default = ["sevenz"]
+sevenz = ["dep:sevenz-rust"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+
+
+
+
+

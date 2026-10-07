@@ -1,0 +1,5 @@
+Package: hexf-parse 0.2.1
+Declared license: CC0-1.0
+Authors from Cargo metadata: Kang Seonghoon <public+rust@mearie.org>
+Source: https://github.com/lifthrasiir/hexf
+Standard license text: https://raw.githubusercontent.com/spdx/license-list-data/main/text/CC0-1.0.txt

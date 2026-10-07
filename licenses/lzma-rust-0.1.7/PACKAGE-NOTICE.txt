@@ -1,0 +1,5 @@
+Package: lzma-rust 0.1.7
+Declared license: Apache-2.0
+Authors from Cargo metadata: Not listed
+Source: https://github.com/dyz1990/sevenz-rust/tree/main/lzma-rust
+Standard license text: https://raw.githubusercontent.com/spdx/license-list-data/main/text/Apache-2.0.txt

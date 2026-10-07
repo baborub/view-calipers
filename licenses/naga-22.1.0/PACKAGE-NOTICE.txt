@@ -1,0 +1,5 @@
+Package: naga 22.1.0
+Declared license: MIT OR Apache-2.0
+Authors from Cargo metadata: gfx-rs developers
+Source: https://github.com/gfx-rs/wgpu/tree/trunk/naga
+Standard license text: https://raw.githubusercontent.com/spdx/license-list-data/main/text/Apache-2.0.txt

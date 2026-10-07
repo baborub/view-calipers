@@ -1,0 +1,5 @@
+Package: simd_helpers 0.1.0
+Declared license: MIT
+Authors from Cargo metadata: Luca Barbato <lu_zero@gentoo.org>
+Source: https://github.com/lu-zero/simd_helpers
+Standard license text: https://raw.githubusercontent.com/spdx/license-list-data/main/text/MIT.txt

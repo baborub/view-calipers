@@ -1,0 +1,2 @@
+https://raw.githubusercontent.com/emilk/egui/fe368bacc4a15697e347607e73a56c0299b3d42d/LICENSE-MIT
+https://raw.githubusercontent.com/emilk/egui/fe368bacc4a15697e347607e73a56c0299b3d42d/LICENSE-APACHE

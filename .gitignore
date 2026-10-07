@@ -1,0 +1,17 @@
+/target/
+/dist/
+/work/
+/tools/
+/files/
+/files.zip
+/*.exe
+/Screenshot*.png
+*.tmp
+*.log
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db
+Desktop.ini
+/Инструкция.txt

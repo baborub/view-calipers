@@ -1,0 +1,5 @@
+Package: zune-inflate 0.2.54
+Declared license: MIT OR Apache-2.0 OR Zlib
+Authors from Cargo metadata: Not listed
+Source: crates.io package source
+Standard license text: https://raw.githubusercontent.com/spdx/license-list-data/main/text/Apache-2.0.txt
