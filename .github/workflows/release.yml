@@ -7,12 +7,19 @@ permissions:
 jobs:
   release:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install video test dependencies
+        shell: pwsh
+        run: |
+          choco install ffmpeg --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw 'FFmpeg installation failed' }
+          ffmpeg -version
+          if ($LASTEXITCODE -ne 0) { throw 'FFmpeg is unavailable' }
       - name: Validate tag and release notes
         shell: pwsh
         run: |
@@ -24,9 +31,6 @@ jobs:
         run: >-
           cargo test --release --locked --
           --skip all_formats_import_geometry_and_render_nonempty_thumbnails
-          --skip video_in_folder_has_thumbnail_playback_pause_and_seek
-          --skip portrait_and_rotation_metadata_keep_same_geometry_during_playback_and_seek
-          --skip split_preview_plays_both_videos_and_pauses_each_independently
       - name: Package
         shell: pwsh
         run: ./scripts/package.ps1
@@ -36,6 +40,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = $env:GITHUB_REF_NAME
-          $assets = @(Get-ChildItem dist -File | ForEach-Object FullName)
+          $assets = @("dist/view-calipers-$tag-windows-x64.zip", 'dist/SHA256SUMS.txt')
           gh release create $tag @assets --draft --verify-tag --title "view-calipers $tag" --notes-file "docs/releases/$tag.md" --repo $env:GITHUB_REPOSITORY
           if ($LASTEXITCODE -ne 0) { throw 'Draft release creation failed' }

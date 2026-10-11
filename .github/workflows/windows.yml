@@ -9,19 +9,23 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
-      - name: Tests without external FFmpeg and Blender
+      - name: Install video test dependencies
+        shell: pwsh
+        run: |
+          choco install ffmpeg --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw 'FFmpeg installation failed' }
+          ffmpeg -version
+          if ($LASTEXITCODE -ne 0) { throw 'FFmpeg is unavailable' }
+      - name: Tests (Blender imports validated locally)
         run: >-
           cargo test --release --locked --
           --skip all_formats_import_geometry_and_render_nonempty_thumbnails
-          --skip video_in_folder_has_thumbnail_playback_pause_and_seek
-          --skip portrait_and_rotation_metadata_keep_same_geometry_during_playback_and_seek
-          --skip split_preview_plays_both_videos_and_pauses_each_independently
       - name: Build and package
         shell: pwsh
         run: ./scripts/package.ps1

@@ -1,6 +1,6 @@
 [package]
 name = "view-calipers"
-version = "0.1.0"
+version = "0.5.0"
 edition = "2021"
 description = "Windows media browser with dual panes, tabs, and previews for images, video, documents, comics, and 3D."
 license = "MIT"
@@ -10,15 +10,23 @@ publish = false
 
 [dependencies]
 eframe = "0.29"
+raw-window-handle = "0.6"
+arboard = "3.6.1"
+windows-core = "0.58"
 egui = "0.29"
 image = "0.25"
+jpeg-decoder = { version = "0.3.2", default-features = false }
 zip = { version = "2", default-features = false, features = ["deflate", "bzip2", "zstd", "lzma"] }
 sevenz-rust = { version = "0.6", optional = true }
 rfd = "0.15"
 anyhow = "1"
+regex = "1.13.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+pulldown-cmark = { version = "0.12.2", default-features = false }
 unrar = "0.5.8"
 egui_commonmark = { version = "0.18.0", default-features = false, features = ["pulldown_cmark"] }
-windows = { version = "0.58", features = ["Data_Pdf", "Storage", "Storage_Streams", "Foundation", "Win32_System_WinRT"] }
+windows = { version = "0.58", features = ["implement", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_SystemServices", "Win32_System_Ole", "Win32_System_Memory", "Win32_System_DataExchange", "Win32_Graphics_Gdi", "Win32_Networking_WinHttp", "Data_Pdf", "Storage", "Storage_Streams", "Foundation", "Win32_System_WinRT", "Win32_System_SystemInformation"] }
 
 [features]
 default = ["sevenz"]

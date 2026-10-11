@@ -130,7 +130,9 @@ Full notices are preserved under `licenses/`. UnRAR additionally requires the co
 | immutable-chunkmap | 2.1.4 | Apache-2.0 OR MIT | [LICENSE-APACHE](licenses/immutable-chunkmap-2.1.4/LICENSE-APACHE), [LICENSE-MIT](licenses/immutable-chunkmap-2.1.4/LICENSE-MIT) |
 | indexmap | 2.14.2 | Apache-2.0 OR MIT | [LICENSE-APACHE](licenses/indexmap-2.14.2/LICENSE-APACHE), [LICENSE-MIT](licenses/indexmap-2.14.2/LICENSE-MIT) |
 | itertools | 0.14.0 | MIT OR Apache-2.0 | [LICENSE-APACHE](licenses/itertools-0.14.0/LICENSE-APACHE), [LICENSE-MIT](licenses/itertools-0.14.0/LICENSE-MIT) |
+| itoa | 1.0.18 | MIT OR Apache-2.0 | [LICENSE-APACHE](licenses/itoa-1.0.18/LICENSE-APACHE), [LICENSE-MIT](licenses/itoa-1.0.18/LICENSE-MIT) |
 | jobserver | 0.1.35 | MIT OR Apache-2.0 | [LICENSE-APACHE](licenses/jobserver-0.1.35/LICENSE-APACHE), [LICENSE-MIT](licenses/jobserver-0.1.35/LICENSE-MIT) |
+| jpeg-decoder | 0.3.2 | MIT OR Apache-2.0 | [LICENSE-APACHE](licenses/jpeg-decoder-0.3.2/LICENSE-APACHE), [LICENSE-MIT](licenses/jpeg-decoder-0.3.2/LICENSE-MIT) |
 | khronos-egl | 6.0.0 | MIT/Apache-2.0 | [LICENSE-APACHE](licenses/khronos-egl-6.0.0/LICENSE-APACHE), [LICENSE-MIT](licenses/khronos-egl-6.0.0/LICENSE-MIT) |
 | khronos_api | 3.1.0 | Apache-2.0 | [UPSTREAM-LICENSE](licenses/khronos_api-3.1.0/UPSTREAM-LICENSE), [UPSTREAM-SOURCES.txt](licenses/khronos_api-3.1.0/UPSTREAM-SOURCES.txt) |
 | lebe | 0.5.3 | BSD-3-Clause | [LICENSE-BSD-3-Clause](licenses/lebe-0.5.3/LICENSE-BSD-3-Clause) |
@@ -207,6 +209,7 @@ Full notices are preserved under `licenses/`. UnRAR additionally requires the co
 | serde | 1.0.229 | MIT OR Apache-2.0 | [LICENSE-APACHE](licenses/serde-1.0.229/LICENSE-APACHE), [LICENSE-MIT](licenses/serde-1.0.229/LICENSE-MIT) |
 | serde_core | 1.0.229 | MIT OR Apache-2.0 | [LICENSE-APACHE](licenses/serde_core-1.0.229/LICENSE-APACHE), [LICENSE-MIT](licenses/serde_core-1.0.229/LICENSE-MIT) |
 | serde_derive | 1.0.229 | MIT OR Apache-2.0 | [LICENSE-APACHE](licenses/serde_derive-1.0.229/LICENSE-APACHE), [LICENSE-MIT](licenses/serde_derive-1.0.229/LICENSE-MIT) |
+| serde_json | 1.0.151 | MIT OR Apache-2.0 | [LICENSE-APACHE](licenses/serde_json-1.0.151/LICENSE-APACHE), [LICENSE-MIT](licenses/serde_json-1.0.151/LICENSE-MIT) |
 | sevenz-rust | 0.6.1 | Apache-2.0 | [LICENSE](licenses/sevenz-rust-0.6.1/LICENSE) |
 | sha2 | 0.10.9 | MIT OR Apache-2.0 | [LICENSE-APACHE](licenses/sha2-0.10.9/LICENSE-APACHE), [LICENSE-MIT](licenses/sha2-0.10.9/LICENSE-MIT) |
 | shlex | 2.0.1 | MIT OR Apache-2.0 | [LICENSE-APACHE](licenses/shlex-2.0.1/LICENSE-APACHE), [LICENSE-MIT](licenses/shlex-2.0.1/LICENSE-MIT) |
@@ -294,6 +297,7 @@ Full notices are preserved under `licenses/`. UnRAR additionally requires the co
 | zerovec-derive | 0.11.6 | Unicode-3.0 | [LICENSE](licenses/zerovec-derive-0.11.6/LICENSE) |
 | zip | 2.4.2 | MIT | [LICENSE](licenses/zip-2.4.2/LICENSE) |
 | zlib-rs | 0.6.8 | Zlib | [LICENSE](licenses/zlib-rs-0.6.8/LICENSE) |
+| zmij | 1.0.23 | MIT | [LICENSE-MIT](licenses/zmij-1.0.23/LICENSE-MIT) |
 | zopfli | 0.8.3 | Apache-2.0 | [COPYING](licenses/zopfli-0.8.3/COPYING) |
 | zstd | 0.13.3 | MIT | [LICENSE](licenses/zstd-0.13.3/LICENSE) |
 | zstd-safe | 7.3.0 | BSD-3-Clause | [LICENSE](licenses/zstd-safe-7.3.0/LICENSE) |
@@ -301,3 +305,7 @@ Full notices are preserved under `licenses/`. UnRAR additionally requires the co
 | zune-core | 0.5.3 | MIT OR Apache-2.0 OR Zlib | [LICENSE-APACHE](licenses/zune-core-0.5.3/LICENSE-APACHE), [LICENSE-MIT](licenses/zune-core-0.5.3/LICENSE-MIT), [LICENSE-ZLIB](licenses/zune-core-0.5.3/LICENSE-ZLIB) |
 | zune-inflate | 0.2.54 | MIT OR Apache-2.0 OR Zlib | [Apache-2.0.txt](licenses/zune-inflate-0.2.54/Apache-2.0.txt), [PACKAGE-NOTICE.txt](licenses/zune-inflate-0.2.54/PACKAGE-NOTICE.txt) |
 | zune-jpeg | 0.5.15 | MIT OR Apache-2.0 OR Zlib | [LICENSE-APACHE](licenses/zune-jpeg-0.5.15/LICENSE-APACHE), [LICENSE-MIT](licenses/zune-jpeg-0.5.15/LICENSE-MIT), [LICENSE-ZLIB](licenses/zune-jpeg-0.5.15/LICENSE-ZLIB) |
+
+## Everything SDK
+
+The embedded x64 Everything SDK DLL is distributed under MIT, copyright David Carpenter (2016). Full notice: [Everything-SDK-MIT.txt](licenses/Everything-SDK-MIT.txt). Source and SDK: https://www.voidtools.com/support/everything/sdk/. The Everything desktop application is external and is not included.

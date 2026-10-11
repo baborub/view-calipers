@@ -202,7 +202,7 @@ pub fn show(ui:&mut egui::Ui, model:Arc<Model>, view:&mut View, renderer:Rendere
             }
         }
     }))});
-    ui.painter().text(rect.left_bottom()+egui::vec2(8.0,-8.0),egui::Align2::LEFT_BOTTOM,"Drag: orbit · Shift+drag: pan · Wheel: zoom · Double-click: fullscreen",egui::FontId::proportional(12.0),egui::Color32::LIGHT_GRAY);
+    ui.painter().text(rect.left_bottom()+egui::vec2(8.0,-8.0),egui::Align2::LEFT_BOTTOM,"Drag: orbit · Shift+drag: pan · Wheel: browse · Ctrl+wheel: zoom · Double-click: fullscreen",egui::FontId::proportional(12.0),egui::Color32::LIGHT_GRAY);
     response.double_clicked()
 }
 

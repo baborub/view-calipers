@@ -5,13 +5,31 @@
 
 use std::cmp::Ordering;
 mod video;
+mod video_frame;
+mod media_gpu;
 mod model3d;
 mod settings;
 use settings::Action;
 mod timeline;
 mod documents;
 mod thumbnail_cache;
+mod video_cache;
 mod image_decode;
+mod image_pipeline;
+mod navigation_benchmark;
+mod everything;
+mod search;
+mod fileops;
+mod clipboard;
+mod file_browser;
+mod folder_views;
+mod collections;
+mod external_images;
+mod board;
+mod workspaces;
+mod ui_theme;
+mod workbench;
+mod preview_compare;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::Read;
@@ -29,7 +47,7 @@ const IMAGE_EXT: &[&str] = &[
     "pbm", "pgm", "ppm", "qoi", "dds",
 ];
 const VIDEO_EXT: &[&str] = &["mp4", "mkv", "avi", "mov", "webm", "m4v", "wmv", "mpg", "mpeg", "ts", "mts", "m2ts", "flv", "ogv"];
-const DOCUMENT_EXT: &[&str] = &["pdf", "md", "markdown"];
+const DOCUMENT_EXT: &[&str] = &["pdf", "md", "markdown", "vcboard"];
 #[cfg(feature = "sevenz")]
 const ARCHIVE_EXT: &[&str] = &["zip", "cbz", "7z", "cb7", "rar", "cbr"];
 #[cfg(not(feature = "sevenz"))]
@@ -209,6 +227,7 @@ fn read_archive_entry(path: &Path, name: &str) -> Result<Vec<u8>> {
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 enum Node {
     Computer,
+    Collection { id:String, name:String },
     Dir(PathBuf),
     Archive(PathBuf),
     /// Виртуальная папка внутри архива. `prefix` пустой или заканчивается на '/'.
@@ -220,6 +239,7 @@ impl Node {
         let mut nodes = vec![Node::Computer];
         let (path, archive_prefix) = match self {
             Node::Computer => return nodes,
+            Node::Collection{..}=>{nodes.push(self.clone());return nodes;}
             Node::Dir(path) => (path, None),
             Node::Archive(path) => (path, Some("")),
             Node::ArchiveDir { archive, prefix } => (archive, Some(prefix.as_str())),
@@ -242,6 +262,7 @@ impl Node {
     fn label(&self) -> String {
         match self {
             Node::Computer => "This PC".into(),
+            Node::Collection{name,..}=>name.clone(),
             Node::Dir(p) => file_name(p),
             Node::Archive(p) => file_name(p),
             Node::ArchiveDir { prefix, .. } => prefix
@@ -293,7 +314,7 @@ fn write_bookmarks(path: &Path, bookmarks: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum ImageSrc {
     File(PathBuf),
     Entry { archive: PathBuf, name: String },
@@ -301,7 +322,7 @@ enum ImageSrc {
 
 fn folder_cover(node: &Node) -> Option<ImageSrc> {
     match node {
-        Node::Computer => None,
+        Node::Computer | Node::Collection{..} => None,
         Node::Dir(path) => {
             let mut images: Vec<PathBuf> = std::fs::read_dir(path).ok()?.flatten()
                 .map(|entry| entry.path())
@@ -326,6 +347,7 @@ fn decode_thumbnail(source: &ImageSrc, use_cache: bool) -> Result<egui::ColorIma
                         return Ok(egui::ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw()));
                     }
                     let bytes = match source {
+                        ImageSrc::File(path) if ext_of_path(path) == "vcboard" => return board::thumbnail(path),
                         ImageSrc::File(path) if model3d::EXTENSIONS.contains(&ext_of_path(path).as_str()) => {
                             let model = model3d::load(path)?;
                             let color = model3d::thumbnail(&model);
@@ -346,8 +368,7 @@ fn decode_thumbnail(source: &ImageSrc, use_cache: bool) -> Result<egui::ColorIma
                         ImageSrc::File(path) => std::fs::read(path)?,
                         ImageSrc::Entry { archive, name } => read_archive_entry(archive, name)?,
                     };
-                    let decoded = image_decode::decode(&bytes)?;
-                    let rgba = decoded.thumbnail(320.min(decoded.width()), 240.min(decoded.height())).to_rgba8();
+                    let rgba = image_decode::thumbnail(&bytes, 320, 240)?.to_rgba8();
                     if let Some(path) = &cached_path { let _ = thumbnail_cache::save(path, &rgba, epoch); }
                     Ok(egui::ColorImage::from_rgba_unmultiplied(
                         [rgba.width() as usize, rgba.height() as usize], rgba.as_raw()))
@@ -366,6 +387,14 @@ struct BrowserTab {
 }
 
 struct App {
+    canvas: collections::canvas::State,
+    external_drop: Option<external_images::NativeDrop>,
+    board: Option<board::Editor>,
+    workbench: workbench::State,
+    workspaces: workspaces::State,
+    files: file_browser::State,
+    file_job: Option<mpsc::Receiver<fileops::Outcome>>,
+    file_message: String,
     tabs: Vec<BrowserTab>,
     active_tab: usize,
     split_preview: bool,
@@ -395,6 +424,9 @@ struct App {
     markdown_cache: egui_commonmark::CommonMarkCache,
     cache_thumbnails: bool,
     fullscreen: bool,
+    wheel_pending: f32,
+    photos: image_pipeline::Client,
+    photo_last: Option<usize>,
     video_seek: Option<f64>,
     scrubber: Option<video::Scrubber>,
     scrub_resume: bool,
@@ -415,7 +447,8 @@ struct App {
     archive_cache: HashMap<PathBuf, Vec<String>>,
     images: Vec<ImageRef>,
     current: Option<usize>,
-    texture: Option<TextureHandle>,
+    texture: Option<media_gpu::Texture>,
+    render_context: Option<egui::Context>,
     tex_size: [usize; 2],
     zoom: f32,
     fit: bool,
@@ -427,6 +460,14 @@ struct App {
 impl App {
     fn new(start: Option<PathBuf>) -> Self {
         let mut app = Self {
+            canvas:collections::canvas::State::default(),
+            external_drop:None,
+            board: None,
+            workbench: workbench::State::default(),
+            workspaces: workspaces::State::default(),
+            files: file_browser::State::default(),
+            file_job: None,
+            file_message: String::new(),
             tabs: vec![BrowserTab { locked: false, title: "This PC".into(), state: None }],
             active_tab: 0,
             split_preview: false,
@@ -456,6 +497,9 @@ impl App {
             markdown_cache: egui_commonmark::CommonMarkCache::default(),
             cache_thumbnails: true,
             fullscreen: false,
+            wheel_pending: 0.0,
+            photos: image_pipeline::Client::default(),
+            photo_last: None,
             video_seek: None,
             scrubber: None,
             scrub_resume: false,
@@ -476,6 +520,7 @@ impl App {
             images: Vec::new(),
             current: None,
             texture: None,
+            render_context: None,
             tex_size: [0, 0],
             zoom: 1.0,
             fit: true,
@@ -488,6 +533,7 @@ impl App {
         app.gallery_nodes = computer_drives();
         app.thumbs = vec![None; app.gallery_nodes.len()];
         app.status = format!("This PC — {} drives", app.gallery_nodes.len());
+        app.refresh_file_rows();
         app.pending_open = start;
         app
     }
@@ -515,6 +561,7 @@ impl App {
     fn children(&mut self, node: &Node) -> Vec<Node> {
         match node {
             Node::Computer => computer_drives(),
+            Node::Collection{id,..}=>collections::get(id).map(|c|c.paths.into_iter().filter_map(|p|if p.is_dir(){Some(Node::Dir(p))}else if p.is_file()&&is_archive_ext(&ext_of_path(&p)){Some(Node::Archive(p))}else{None}).collect()).unwrap_or_default(),
             Node::Dir(p) => {
                 let mut dirs: Vec<PathBuf> = Vec::new();
                 let mut archives: Vec<PathBuf> = Vec::new();
@@ -567,12 +614,13 @@ impl App {
     fn images_of(&mut self, node: &Node) -> Vec<ImageRef> {
         match node {
             Node::Computer => Vec::new(),
+            Node::Collection{id,..}=>collections::get(id).map(|c|c.paths.into_iter().filter(|p|p.is_file()&&(is_image_ext(&ext_of_path(p))||VIDEO_EXT.contains(&ext_of_path(p).as_str())||DOCUMENT_EXT.contains(&ext_of_path(p).as_str())||model3d::EXTENSIONS.contains(&ext_of_path(p).as_str()))).map(|p|ImageRef{label:file_name(&p),src:ImageSrc::File(p)}).collect()).unwrap_or_default(),
             Node::Dir(p) => {
                 let mut v: Vec<PathBuf> = std::fs::read_dir(p)
                     .map(|rd| {
                         rd.flatten()
                             .map(|e| e.path())
-                            .filter(|p| p.is_file() && (is_image_ext(&ext_of_path(p)) || VIDEO_EXT.contains(&ext_of_path(p).as_str()) || DOCUMENT_EXT.contains(&ext_of_path(p).as_str()) || model3d::EXTENSIONS.contains(&ext_of_path(p).as_str())))
+                            .filter(|p| ext_of_path(p)!="vcboard" && p.is_file() && (is_image_ext(&ext_of_path(p)) || VIDEO_EXT.contains(&ext_of_path(p).as_str()) || DOCUMENT_EXT.contains(&ext_of_path(p).as_str()) || model3d::EXTENSIONS.contains(&ext_of_path(p).as_str())))
                             .collect()
                     })
                     .unwrap_or_default();
@@ -616,6 +664,11 @@ impl App {
             let parent = p.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
             self.expanded.insert(Node::Dir(parent.clone()));
             let ext = ext_of_path(p);
+            if ext == "vcboard" {
+                self.select(Node::Dir(parent),ctx);
+                match board::Editor::open(p) {Ok(editor)=>self.board=Some(editor),Err(e)=>self.file_message=e.to_string()}
+                return;
+            }
             if is_archive_ext(&ext) {
                 let n = Node::Archive(p.to_path_buf());
                 self.expanded.insert(n.clone());
@@ -632,6 +685,13 @@ impl App {
     }
 
     fn select(&mut self, node: Node, ctx: &egui::Context) {
+        if !self.close_board() { return; }
+        let node=match node{Node::Collection{id,..}=>collections::get(&id).map(|c|Node::Collection{id,name:c.name}).unwrap_or(Node::Computer),other=>other};
+        self.save_folder_view(true);
+        if self.files.search.results{self.files.view_folder=None;}
+        self.files.search.navigation_reset();
+        self.photos.cancel(); self.photo_last=None;
+        self.file_message.clear();
         if self.tabs[self.active_tab].locked && self.selected.as_ref() != Some(&node) {
             self.new_tab(false, ctx);
         }
@@ -661,7 +721,10 @@ impl App {
         }
         self.images = self.images_of(&node);
         self.gallery_nodes = self.children(&node);
+        if let Node::Collection{id,..}=&node{if !matches!(&self.selected,Some(Node::Collection{id:old,..}) if old==id){self.files.collection_custom=true;}}
         self.selected = Some(node);
+        self.restore_folder_view();
+        self.refresh_file_rows();
         self.current = None;
         self.texture = None;
         self.gallery = true;
@@ -675,7 +738,7 @@ impl App {
     fn reveal_ancestors(&mut self, node: &Node) {
         self.expanded.insert(Node::Computer);
         let path = match node {
-            Node::Computer => return,
+            Node::Computer | Node::Collection{..} => return,
             Node::Dir(path) | Node::Archive(path) => path,
             Node::ArchiveDir { archive, prefix } => {
                 self.expanded.insert(Node::Archive(archive.clone()));
@@ -699,7 +762,10 @@ impl App {
         if i >= self.images.len() {
             return;
         }
+        if !self.close_board() { return; }
+        self.photos.cancel();
         self.current = Some(i);
+        if let Some(row)=self.files.rows_for_media(i) {self.files.select_only(row);}
         self.model = None;
         self.model_request = None;
         self.model_error = None;
@@ -714,6 +780,10 @@ impl App {
         self.video = None;
         self.gallery = true;
         if let ImageSrc::File(path) = &self.images[i].src {
+            if ext_of_path(path) == "vcboard" {
+                match board::Editor::open(path) { Ok(board)=>self.board=Some(board), Err(error)=>self.status=format!("Board: {error}") }
+                return;
+            }
             if model3d::EXTENSIONS.contains(&ext_of_path(path).as_str()) {
                 self.model_view = model3d::View::default();
                 self.model_request = Some(self.model_loader.get_or_insert_with(|| model3d::Loader::new(ctx.clone())).request(path.clone()));
@@ -721,6 +791,7 @@ impl App {
                 return;
             }
         }
+        if image_pipeline::is_photo(&self.images[i].src) {self.request_photo(i,ctx);return;}
         match self.load_image(ctx, &self.images[i].src.clone()) {
             Ok(()) => {
                 self.fit = true;
@@ -740,13 +811,9 @@ impl App {
             self.load_pdf_page(next, ctx);
             return;
         }
-        if self.images.is_empty() {
-            return;
-        }
-        let cur = self.current.unwrap_or(0) as isize;
-        let n = self.images.len() as isize;
-        let next = (cur + d).rem_euclid(n) as usize;
-        self.goto(next, ctx);
+        let media=self.media_navigation();if media.is_empty(){return;}
+        let cur=self.current.and_then(|i|media.iter().position(|&m|m==i)).unwrap_or(0) as isize;
+        let next=(cur+d).rem_euclid(media.len() as isize) as usize;self.goto(media[next],ctx);
     }
 
     fn load_image(&mut self, ctx: &egui::Context, src: &ImageSrc) -> Result<()> {
@@ -764,9 +831,11 @@ impl App {
             ImageSrc::File(p) if VIDEO_EXT.contains(&ext_of_path(p).as_str()) => {
                 let bytes = video::poster(p, 0.0, video::WIDTH as u32, video::HEIGHT as u32)?;
                 let poster = image::load_from_memory(&bytes)?;
-                let player = video::Player::new(p.clone(), [poster.width() as usize, poster.height() as usize])?;
-                self.video = Some(player);
-                bytes
+                let size = [poster.width() as usize, poster.height() as usize];
+                self.video = Some(video::Player::new(p.clone(), size)?);
+                self.texture = Some(ctx.load_texture("current", egui::ColorImage::from_rgb(size, poster.to_rgb8().as_raw()), TextureOptions::LINEAR).into());
+                self.tex_size = size;
+                return Ok(());
             }
             ImageSrc::File(p) => std::fs::read(p).with_context(|| p.display().to_string())?,
             ImageSrc::Entry { archive, name } => read_archive_entry(archive, name)?,
@@ -778,7 +847,7 @@ impl App {
         let rgba = img.to_rgba8();
         let size = [rgba.width() as usize, rgba.height() as usize];
         let color = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
-        self.texture = Some(ctx.load_texture("current", color, TextureOptions::LINEAR));
+        self.texture = Some(ctx.load_texture("current", color, TextureOptions::LINEAR).into());
         self.tex_size = size;
         Ok(())
     }
@@ -803,7 +872,7 @@ impl App {
             match result {
                 Ok(color) => {
                     self.tex_size = color.size;
-                    self.texture = Some(ctx.load_texture("pdf-page", color, TextureOptions::LINEAR));
+                    self.texture = Some(ctx.load_texture("pdf-page", color, TextureOptions::LINEAR).into());
                 }
                 Err(error) => { self.pdf_request = None; self.status = format!("PDF: {error}"); }
             }
@@ -837,6 +906,9 @@ impl App {
     }
     fn set_fullscreen(&mut self, ctx: &egui::Context, fullscreen: bool) {
         self.fullscreen = fullscreen;
+        self.workbench.paired_fullscreen=fullscreen&&self.settings.compare_fullscreen&&self.split_preview&&self.dual_panes;
+        if let Some(other)=self.inactive.as_mut(){other.fullscreen=self.workbench.paired_fullscreen;if other.model.is_none(){other.fit=true;}other.pan=Vec2::ZERO;}
+
         if self.model.is_none() { self.fit = true; }
         self.pan = Vec2::ZERO;
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(fullscreen));
@@ -858,7 +930,7 @@ impl App {
             _ => None,
         };
         ui.horizontal(|ui| {
-            ui.strong("Folder bookmarks");
+            ui.strong("Favorites");
             if ui.add_enabled(selected_folder.is_some(), egui::Button::new("+ Add"))
                 .on_hover_text("Bookmark the selected folder").clicked() {
                 if let Some(path) = selected_folder { self.add_bookmark(path); }
@@ -867,18 +939,20 @@ impl App {
         ui.separator();
         let mut clicked = None;
         let mut remove = None;
-        egui::ScrollArea::both().id_salt("bookmarks_scroll").auto_shrink([false, false]).show(ui, |ui| {
+        egui::ScrollArea::vertical().id_salt("bookmarks_scroll").auto_shrink([false, false]).show(ui, |ui| {
             if self.bookmarks.is_empty() { ui.label("Select a folder and click + Add"); }
             for (i, path) in self.bookmarks.iter().enumerate() {
                 ui.horizontal(|ui| {
                     if ui.small_button("×").on_hover_text("Remove bookmark").clicked() { remove = Some(i); }
-                    if ui.selectable_label(self.selected.as_ref() == Some(&Node::Dir(path.clone())), file_name(path))
+                    if ui_theme::sidebar_label(ui,self.selected.as_ref() == Some(&Node::Dir(path.clone())), file_name(path))
                         .on_hover_text(path.display().to_string()).clicked() {
                         if path.is_dir() { clicked = Some(Node::Dir(path.clone())); }
                         else { self.status = format!("Folder unavailable: {}", path.display()); }
                     }
                 });
             }
+            ui.separator();
+            if let Some(node)=self.collection_sidebar(ui){clicked=Some(node);}
         });
         if let Some(i) = remove {
             self.bookmarks.remove(i);
@@ -899,7 +973,9 @@ impl App {
         self.thumb_queue = Some(queue.clone());
         let (tx, rx) = mpsc::sync_channel(16);
         self.thumb_rx = Some(rx);
-        for _ in 0..2 {
+        // Keep CPU headroom for the UI and two video players; never spawn a thread per file.
+        let workers = std::thread::available_parallelism().map_or(2, |n| (n.get() / 2).clamp(1, 4));
+        for _ in 0..workers {
             let sources = sources.clone(); let folders = folders.clone(); let queue = queue.clone();
             let token = self.thumb_generation.clone(); let tx = tx.clone(); let ctx = ctx.clone();
             let use_cache = self.cache_thumbnails;
@@ -927,140 +1003,13 @@ impl App {
         }
     }
 
-    fn show_gallery(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Thumbnail size");
-            ui.add(egui::Slider::new(&mut self.thumb_size, 80.0..=320.0).suffix(" px"));
-            if ui.checkbox(&mut self.cache_thumbnails, "Cache thumbnails").on_hover_text(thumbnail_cache::directory().display().to_string()).changed() {
-                self.start_thumbnails(ui.ctx());
-            }
-            if ui.button("Clear cache").clicked() {
-                self.thumb_generation.fetch_add(1, AtomicOrdering::Relaxed);
-                self.thumb_rx = None;
-                match thumbnail_cache::clear() {
-                    Ok(count) => self.status = format!("Cache cleared: {count} files"),
-                    Err(error) => self.status = format!("Cache: {error}"),
-                }
-                let enabled = self.cache_thumbnails;
-                self.cache_thumbnails = false;
-                self.start_thumbnails(ui.ctx());
-                self.cache_thumbnails = enabled;
-            }
-        });
-        ui.separator();
-        let tile_width = (self.thumb_size + 10.0).min(ui.available_width()).max(1.0);
-        let preview_height = (tile_width - 10.0).max(1.0) * 0.75;
-        let tile_height = preview_height + 35.0;
-        let columns = ((ui.available_width() + ui.spacing().item_spacing.x)
-            / (tile_width + ui.spacing().item_spacing.x)).floor() as usize;
-        let columns = columns.max(1);
-        let node_count = self.gallery_nodes.len();
-        let count = node_count + self.images.len();
-        if count == 0 {
-            if let Some(Node::Archive(path) | Node::ArchiveDir { archive: path, .. }) = &self.selected {
-                if let Some(message) = self.archive_errors.get(path).cloned() {
-                    ui.label(RichText::new(message).color(Color32::LIGHT_RED));
-                    ui.label("The archive may be damaged or incompletely downloaded.");
-                    if ui.button("Retry reading archive").clicked() {
-                        if let Some(node) = self.selected.clone() { self.select(node, ui.ctx()); }
-                    }
-                    return;
-                }
-            }
-            ui.centered_and_justified(|ui| { ui.label("Folder is empty: no media, folders or archives"); });
-            return;
-        }
-        let mut node_click = None;
-        let mut image_click = None;
-        let mut open_fullscreen = false;
-        egui::ScrollArea::vertical().id_salt("gallery").show_rows(ui, tile_height,
-            count.div_ceil(columns), |ui, rows| {
-                if let Some(queue) = &self.thumb_queue {
-                    let mut queue = queue.lock().unwrap();
-                    let visible: Vec<_> = (rows.start * columns..(rows.end * columns).min(count))
-                        .map(|i| if i < node_count { self.images.len() + i } else { i - node_count }).collect();
-                    for i in visible.into_iter().rev() {
-                        if let Some(index) = queue.iter().position(|job| *job == i) { queue.remove(index); queue.push_front(i); }
-                    }
-                }
-                for row in rows {
-                    ui.horizontal(|ui| {
-                        for index in row * columns..((row + 1) * columns).min(count) {
-                            ui.vertical(|ui| {
-                                let (rect, response) = ui.allocate_exact_size(Vec2::new(tile_width, tile_height), Sense::click());
-                                let painter = ui.painter();
-                                let selected = index >= node_count && self.current == Some(index - node_count);
-                                painter.rect_filled(rect, 5.0, if selected { Color32::from_rgb(40, 75, 100) } else if response.hovered() { Color32::from_gray(55) } else { Color32::from_gray(32) });
-                                let preview = Rect::from_min_size(rect.min + Vec2::new(5.0, 5.0), Vec2::new((tile_width - 10.0).max(1.0), preview_height));
-                                let label;
-                                if index < node_count {
-                                    let node = &self.gallery_nodes[index];
-                                    label = node.label();
-                                    let kind = if matches!(node, Node::Archive(_)) { "Archive" } else { "Folder" };
-                                    if let Some(tex) = &self.thumbs[self.images.len() + index] {
-                                        let size = tex.size_vec2();
-                                        let scale = (preview.width() / size.x).min(preview.height() / size.y);
-                                        painter.image(tex.id(), Rect::from_center_size(preview.center(), size * scale),
-                                            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
-                                        painter.text(preview.right_bottom(), Align2::RIGHT_BOTTOM, kind,
-                                            FontId::proportional(12.0), Color32::from_rgb(230, 190, 90));
-                                    } else {
-                                        painter.text(preview.center(), Align2::CENTER_CENTER, kind,
-                                            FontId::proportional(23.0), Color32::from_rgb(230, 190, 90));
-                                    }
-                                    if response.clicked() { node_click = Some(node.clone()); }
-                                } else {
-                                    let i = index - node_count;
-                                    label = self.images[i].label.clone();
-                                    if let Some(tex) = &self.thumbs[i] {
-                                        let size = tex.size_vec2();
-                                        let scale = (preview.width() / size.x).min(preview.height() / size.y);
-                                        painter.image(tex.id(), Rect::from_center_size(preview.center(), size * scale),
-                                            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
-                                    } else {
-                                        painter.text(preview.center(), Align2::CENTER_CENTER,
-                                            if self.thumb_errors.contains_key(&i) { "Error" } else { "Loading…" },
-                                            FontId::proportional(14.0), Color32::GRAY);
-                                    }
-                                    if response.clicked() { image_click = Some(i); }
-                                    if response.double_clicked() {
-                                        image_click = Some(i);
-                                        open_fullscreen = true;
-                                    }
-                                    if matches!(&self.images[i].src, ImageSrc::File(path) if VIDEO_EXT.contains(&ext_of_path(path).as_str())) {
-                                        painter.text(preview.right_bottom(), Align2::RIGHT_BOTTOM, "▶ Video", FontId::proportional(12.0), Color32::WHITE);
-                                    }
-                                    if let ImageSrc::File(path) = &self.images[i].src {
-                                        let ext = ext_of_path(path);
-                                        if DOCUMENT_EXT.contains(&ext.as_str()) || model3d::EXTENSIONS.contains(&ext.as_str()) {
-                                            painter.text(preview.right_bottom(), Align2::RIGHT_BOTTOM, ext.to_uppercase(), FontId::proportional(12.0), Color32::from_rgb(70, 140, 220));
-                                        }
-                                    }
-                                }
-                                let text_rect = Rect::from_min_size(rect.min + Vec2::new(6.0, preview_height + 10.0), Vec2::new((tile_width - 12.0).max(1.0), 22.0));
-                                painter.with_clip_rect(text_rect).text(text_rect.left_center(), Align2::LEFT_CENTER,
-                                    &label, FontId::proportional(13.0), Color32::WHITE);
-                                response.on_hover_text(label);
-                            });
-                        }
-                    });
-                }
-            });
-        if let Some(node) = node_click {
-            self.expanded.insert(node.clone());
-            self.select(node, ui.ctx());
-        }
-        if let Some(i) = image_click {
-            if self.current != Some(i) { self.goto(i, ui.ctx()); }
-            if open_fullscreen && (self.texture.is_some() || self.markdown.is_some() || self.model_request.is_some() || self.model.is_some()) { self.set_fullscreen(ui.ctx(), true); }
-        }
-    }
+    fn show_gallery(&mut self, ui: &mut egui::Ui) { self.file_gallery(ui); }
 
     fn show_tree(&mut self, ui: &mut egui::Ui, node: &Node, depth: usize) -> Option<Node> {
         let mut clicked: Option<Node> = None;
         let expanded = self.expanded.contains(node);
         ui.horizontal(|ui| {
-            ui.add_space(depth as f32 * 14.0);
+            ui.add_space((depth as f32 * 14.0).min((ui.available_width()-80.0).max(0.0)));
             let (_, resp) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::click());
             egui::collapsing_header::paint_default_icon(ui, if expanded { 1.0 } else { 0.0 }, &resp);
             if resp.clicked() {
@@ -1075,11 +1024,12 @@ impl App {
                 text = text.color(Color32::from_rgb(230, 190, 90));
             }
             let is_sel = self.selected.as_ref() == Some(node);
-            let response = ui.selectable_label(is_sel, text);
+            let response = ui_theme::sidebar_label(ui,is_sel, text).on_hover_text(node.label());
             if response.clicked() {
                 clicked = Some(node.clone());
             }
             if let Node::Dir(path) = node {
+                self.folder_drop_target(ui,&response,path);
                 response.context_menu(|ui| {
                     if ui.button("Bookmark this folder").clicked() {
                         self.add_bookmark(path.clone());
@@ -1102,7 +1052,7 @@ impl App {
         let ctx = ui.ctx().clone();
                 if let Some(player) = &mut self.video {
                     ui.horizontal_wrapped(|ui| {
-                        if ui.button(if player.playing() { "Pause" } else { "▶ Play" }).clicked() {
+                        if ui_theme::button(ui,if player.playing(){ui_theme::Icon::Pause}else{ui_theme::Icon::Play},"Play / pause",true,false).clicked() {
                             if player.playing() { player.pause(); }
                             else if let Err(error) = player.play(&ctx) { self.status = format!("Video: {error}"); }
                         }
@@ -1110,22 +1060,17 @@ impl App {
                             if let Err(error) = player.play(&ctx) { self.status = format!("Video: {error}"); }
                         }
                         ui.checkbox(&mut player.range.repeat, "Loop");
-                        let mut gpu = video::GPU.load(AtomicOrdering::Relaxed);
-                        if ui.checkbox(&mut gpu, "GPU decoding").on_hover_text("FFmpeg hardware decoding; automatic accelerator selection").changed() {
-                            video::GPU.store(gpu, AtomicOrdering::Relaxed);
-                            if player.playing() { let _ = player.play(&ctx); }
-                        }
                     });
                     let mut range_changed = false;
                     ui.horizontal_wrapped(|ui| {
                         range_changed |= ui.checkbox(&mut player.range.enabled, "A–B range").changed();
-                        if ui.button("A — Start").on_hover_text("Set the range start to the current position").clicked() {
+                        if ui.button("Set A").on_hover_text("Set the range start to the current position").clicked() {
                             player.range.set_start(player.position, player.duration); range_changed = true;
                         }
-                        if ui.button("B — End").on_hover_text("Set the range end to the current position").clicked() {
+                        if ui.button("Set B").on_hover_text("Set the range end to the current position").clicked() {
                             player.range.set_end(player.position, player.duration); range_changed = true;
                         }
-                        if ui.button("Reset A–B").clicked() {
+                        if ui.button("Reset").clicked() {
                             let repeat = player.range.repeat;
                             player.range = video::PlaybackRange::new(player.duration);
                             player.range.repeat = repeat;
@@ -1137,14 +1082,14 @@ impl App {
                     if action.seeking {
                         if self.video_seek.is_none() { self.scrub_resume = player.playing(); player.pause(); }
                         if self.video_seek.is_none_or(|previous| (previous - position).abs() > 0.001) {
-                            self.scrubber.get_or_insert_with(|| video::Scrubber::new(player.path.clone(), ctx.clone()))
-                                .seek(position.min((player.duration - 0.05).max(0.0)));
+                            self.scrubber.get_or_insert_with(|| video::Scrubber::new(player.path.clone(), player.frame_size, player.fps, ctx.clone()))
+                                .seek_preview(position.min((player.duration - 0.05).max(0.0)));
                         }
                         self.video_seek = Some(position);
                         player.position = position;
                     }
                     range_changed |= action.range_committed;
-                    ui.label(format!("A {}  —  B {}", timeline::timecode(player.range.start), timeline::timecode(player.range.end)));
+
                     if action.seek.is_some() || range_changed {
                         if let Some(position) = action.seek { player.position = position; }
                         let playing = player.playing() || self.scrub_resume;
@@ -1156,16 +1101,18 @@ impl App {
                             self.scrubber = None;
                             if let Err(error) = player.play(&ctx) { self.status = format!("Video: {error}"); }
                         } else {
-                            self.scrubber.get_or_insert_with(|| video::Scrubber::new(player.path.clone(), ctx.clone()))
+                            self.scrubber.get_or_insert_with(|| video::Scrubber::new(player.path.clone(), player.frame_size, player.fps, ctx.clone()))
                                 .seek(player.position.min((player.duration - 0.05).max(0.0)));
                         }
                     }
                 }
     }
     fn show_image(&mut self, ui: &mut egui::Ui) {
+        if let Some(board)=&mut self.board { if board.show(ui) {self.workbench.fullscreen_request=Some(!self.fullscreen);} return; }
+        self.preview_wheel(ui);
         if let Some(model) = self.model.clone() {
             if self.fit { self.model_view = model3d::View::default(); self.fit = false; }
-            if model3d::show(ui, model, &mut self.model_view, self.model_renderer.clone(), &self.settings) { self.set_fullscreen(ui.ctx(), !self.fullscreen); }
+            if model3d::show(ui, model, &mut self.model_view, self.model_renderer.clone(), &self.settings) { self.workbench.fullscreen_request=Some(!self.fullscreen); }
             return;
         }
         if let Some(error) = &self.model_error { ui.label(format!("3D preview unavailable: {error}")); return; }
@@ -1180,19 +1127,20 @@ impl App {
             });
             if ui.ctx().input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary)
                 && i.pointer.interact_pos().is_some_and(|pos| rect.contains(pos))) {
-                self.set_fullscreen(ui.ctx(), !self.fullscreen);
+                self.workbench.fullscreen_request=Some(!self.fullscreen);
             }
             return;
         }
         let avail = ui.available_rect_before_wrap();
         let resp = ui.allocate_rect(avail, Sense::click_and_drag());
-        ui.painter().rect_filled(avail, 0.0, Color32::from_gray(24));
+        ui.painter().rect_filled(avail, 0.0, Color32::from_rgb(16,17,19));
 
         let Some(tex) = self.texture.clone() else {
+            if resp.double_clicked() && self.current.is_some(){self.workbench.fullscreen_request=Some(!self.fullscreen);}
             ui.painter().text(
                 avail.center(),
                 Align2::CENTER_CENTER,
-                "Select a file in the thumbnail grid",
+                if self.current.is_some(){&self.status}else{"Select a file to preview"},
                 FontId::proportional(16.0),
                 Color32::GRAY,
             );
@@ -1207,7 +1155,7 @@ impl App {
         }
 
         let scroll = ui.input(|i| i.raw_scroll_delta.y);
-        if scroll != 0.0 && resp.hovered() {
+        if scroll != 0.0 && resp.hovered() && ui.input(|i|i.modifiers.ctrl) {
             let old = self.zoom;
             let new = (old * (scroll * 0.0025).exp()).clamp(0.02, 64.0);
             if let Some(mouse) = resp.hover_pos() {
@@ -1223,17 +1171,12 @@ impl App {
             self.fit = false;
         }
         if resp.double_clicked() {
-            self.set_fullscreen(ui.ctx(), !self.fullscreen);
+            self.workbench.fullscreen_request=Some(!self.fullscreen);
         }
 
         let size = Vec2::new(w, h) * self.zoom;
         let rect = Rect::from_center_size(avail.center() + self.pan, size);
-        ui.painter().image(
-            tex.id(),
-            rect,
-            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-            Color32::WHITE,
-        );
+        tex.paint(&ui.painter().with_clip_rect(avail.intersect(ui.clip_rect())), rect, avail);
         ui.painter().text(
             avail.left_top() + Vec2::new(8.0, 6.0),
             Align2::LEFT_TOP,
@@ -1243,6 +1186,8 @@ impl App {
         );
     }
     fn poll_media(&mut self, ctx: &egui::Context) {
+        self.poll_search(ctx);
+        self.poll_photo(ctx);
         self.poll_pdf_page(ctx);
         if let Some((id, result)) = self.model_loader.as_ref().and_then(model3d::Loader::poll) {
             if self.model_request == Some(id) {
@@ -1257,17 +1202,21 @@ impl App {
         if self.video.as_ref().is_some_and(|player| player.playing()) { self.scrubber = None; }
         if let Some(result) = self.scrubber.as_ref().and_then(video::Scrubber::poll) {
             match result {
-                Ok(color) => { self.tex_size = color.size; self.texture = Some(ctx.load_texture("video-scrub", color, TextureOptions::LINEAR)); }
+                Ok(color) => {
+                    self.tex_size = color.size;
+                    media_gpu::video(ctx, &mut self.texture, &color);
+                }
                 Err(error) => self.status = format!("Video: {error}"),
             }
         }
         if let Some(player) = &mut self.video {
+            player.preload(ctx);
             if let Some(color) = match player.poll(ctx) { Ok(frame) => frame, Err(error) => { self.status = format!("Video: {error}"); None } } {
                 self.tex_size = color.size;
-                if let Some(texture) = &mut self.texture { texture.set(color, TextureOptions::LINEAR); }
-                else { self.texture = Some(ctx.load_texture("video-frame", color, TextureOptions::LINEAR)); }
+                media_gpu::video(ctx, &mut self.texture, &color);
+                player.recycle(color);
             }
-            if player.playing() { ctx.request_repaint_after(std::time::Duration::from_millis(16)); }
+            if let Some(delay) = player.next_repaint() { ctx.request_repaint_after(delay); }
         }
         self.receive_thumbnails(ctx);
 
@@ -1283,6 +1232,7 @@ impl App {
         if let Some(current)=&self.selected {let nodes=current.breadcrumbs();if nodes.len()>1 {self.select(nodes[nodes.len()-2].clone(),ctx);}}
     }
     fn switch_pane(&mut self, index: usize) {
+        self.save_folder_view(true);
         if !self.dual_panes || index==self.active_pane {return;}
         // Both players remain visible in split preview; focus must not stop either one.
         if !self.split_preview {
@@ -1300,21 +1250,23 @@ impl App {
     }
     fn swap_browser(&mut self, other: &mut App) {
         macro_rules! swap {($($field:ident),*)=>{$(std::mem::swap(&mut self.$field,&mut other.$field);)*};}
-        swap!(history,history_index,model,model_loader,model_request,model_error,model_view,model_renderer,
+        swap!(board,photos,photo_last,wheel_pending,files,history,history_index,model,model_loader,model_request,model_error,model_view,model_renderer,
             pdf,pdf_scrubber,pdf_request,markdown,markdown_cache,cache_thumbnails,video_seek,scrubber,scrub_resume,
             thumb_queue,video,thumb_size,archive_errors,gallery,gallery_nodes,thumbs,thumb_errors,thumb_rx,
             thumb_generation,expanded,selected,archive_cache,images,current,texture,tex_size,zoom,fit,pan,status,pending_open);
     }
     fn switch_tab(&mut self, index: usize) {
+        self.save_folder_view(true);
         if index == self.active_tab || index >= self.tabs.len() { return; }
+        self.photos.cancel();
         if let Some(video) = &mut self.video { video.pause(); }
         self.scrubber = None; self.video_seek = None; self.scrub_resume = false;
         let mut state = self.tabs[index].state.take().expect("Inactive tab has browser state");
         self.swap_browser(&mut state);
         self.tabs[self.active_tab].state = Some(state);
         self.active_tab = index;
+        if self.texture.is_none(){if let (Some(i),Some(ctx))=(self.current,self.photos.context()){if image_pipeline::is_photo(&self.images[i].src){self.request_photo(i,&ctx);}}}
         self.cache_thumbnails = self.settings.cache;
-        self.thumb_size = self.settings.thumb_size;
     }
     fn new_tab(&mut self, duplicate: bool, ctx: &egui::Context) {
         let mut state = App::new(None);
@@ -1327,6 +1279,11 @@ impl App {
             if let Some(index) = self.current { state.goto(index, ctx); }
             state.zoom = self.zoom; state.fit = self.fit; state.pan = self.pan;
             state.model_view = self.model_view.clone();
+            state.files.details = self.files.details;
+            state.files.sort = self.files.sort;
+            state.files.collection_custom=self.files.collection_custom;
+            state.files.columns = self.files.columns.clone();
+            state.files.sort_rows();
         }
         let title = state.selected.as_ref().map(Node::label).unwrap_or_else(|| "This PC".into());
         self.tabs.push(BrowserTab { locked: false, title, state: Some(Box::new(state)) });
@@ -1336,37 +1293,14 @@ impl App {
         if self.tabs.len() <= 1 || index >= self.tabs.len() || self.tabs[index].locked { return; }
         if index == self.active_tab { self.switch_tab(if index > 0 { index - 1 } else { 1 }); }
         if let Some(mut state) = self.tabs.remove(index).state {
+            state.save_folder_view(true);
             state.thumb_generation.fetch_add(1, AtomicOrdering::Relaxed);
             self.retired_renderers.push(state.model_renderer.clone());
             self.retired_renderers.append(&mut state.retired_renderers);
         }
         if self.active_tab > index { self.active_tab -= 1; }
     }
-    fn show_tabs(&mut self, ui: &mut egui::Ui) {
-        let mut switch = None; let mut close = None; let mut lock = None; let mut duplicate = None; let mut add = false;
-        egui::ScrollArea::horizontal().id_salt("tabs").show(ui, |ui| { ui.horizontal(|ui| {
-            for (index, tab) in self.tabs.iter().enumerate() {
-                ui.push_id(index, |ui| {
-                    let label = format!("{}{}", if tab.locked { "[Locked] " } else { "" }, tab.title);
-                    let response = ui.selectable_label(index == self.active_tab, label).on_hover_text("Right-click for tab actions");
-                    if response.clicked() { switch = Some(index); }
-                    response.context_menu(|ui| {
-                        if ui.button("New tab").clicked() { add = true; ui.close_menu(); }
-                        if ui.button("Duplicate tab").clicked() { duplicate = Some(index); ui.close_menu(); }
-                        if ui.button(if tab.locked { "Unlock tab" } else { "Lock tab" }).clicked() { lock = Some(index); ui.close_menu(); }
-                        if ui.add_enabled(!tab.locked && self.tabs.len() > 1, egui::Button::new("Close tab")).clicked() { close = Some(index); ui.close_menu(); }
-                    });
-                    if ui.add_enabled(!tab.locked && self.tabs.len() > 1, egui::Button::new("×").small()).on_hover_text("Close tab").clicked() { close = Some(index); }
-                });
-            }
-            if ui.small_button("+").on_hover_text("New tab").clicked() { add = true; }
-        }); });
-        if let Some(index) = switch { self.switch_tab(index); }
-        if let Some(index) = lock { self.tabs[index].locked = !self.tabs[index].locked; }
-        if let Some(index) = close { self.close_tab(index); }
-        if let Some(index) = duplicate { self.switch_tab(index); self.new_tab(true, ui.ctx()); }
-        if add { self.new_tab(false, ui.ctx()); }
-    }
+    fn show_tabs(&mut self,ui:&mut egui::Ui) {self.styled_tabs(ui);}
     fn set_dual(&mut self, enabled: bool, ctx: &egui::Context) {
         if !enabled && self.dual_panes {self.switch_pane(0);}
         if enabled && self.inactive.is_none() {
@@ -1376,14 +1310,22 @@ impl App {
             self.inactive=Some(Box::new(other));
         }
         self.dual_panes=enabled;self.settings.dual=enabled;
-        if !enabled {self.split_preview=false;if let Some(other)=self.inactive.as_mut(){if let Some(video)=&mut other.video{video.pause();}}}
+        if enabled {if let Some(other)=self.inactive.as_mut(){if other.texture.is_none(){if let Some(i)=other.current{if image_pipeline::is_photo(&other.images[i].src){other.request_photo(i,ctx);}}}}}
+        else if let Some(other)=self.inactive.as_mut(){other.photos.cancel();}
+
+        if !enabled {self.workbench.paired_fullscreen=false;if let Some(other)=self.inactive.as_mut(){other.fullscreen=false;}self.split_preview=false;self.settings.split_preview=false;if let Some(other)=self.inactive.as_mut(){if let Some(video)=&mut other.video{video.pause();}}}
     }
     fn apply_preferences(&mut self,ctx:&egui::Context) {
+        image_pipeline::Client::configure(ctx,self.settings.photo_ram_mb,self.settings.photo_gpu_mb);
+        if !self.settings.photo_preload {self.photos.disable_preload();if let Some(other)=self.inactive.as_mut(){other.photos.disable_preload();}}
+
+        ui_theme::apply(ctx,self.settings.comfortable);
         self.set_dual(self.settings.dual,ctx);
         self.thumb_size=self.settings.thumb_size;
         let reload=self.cache_thumbnails!=self.settings.cache;self.cache_thumbnails=self.settings.cache;
         if reload{self.start_thumbnails(ctx);}
         video::GPU.store(self.settings.gpu,AtomicOrdering::Relaxed);
+        video_cache::configure(self.settings.scrub_ram_mb,self.settings.preload_video,self.settings.cuda_preload);
         if let Some(other)=self.inactive.as_mut(){other.settings=self.settings.clone();other.thumb_size=self.settings.thumb_size;
             if other.cache_thumbnails!=self.settings.cache {other.cache_thumbnails=self.settings.cache;other.start_thumbnails(ctx);}
         }
@@ -1394,25 +1336,8 @@ impl App {
         self.settings.gpu=video::GPU.load(AtomicOrdering::Relaxed);self.settings.dual=self.dual_panes;
         self.settings_open=true;
     }
-    fn show_navigation(&mut self,ui:&mut egui::Ui) {
-        let ctx=ui.ctx().clone();
-        if ui.add_enabled(self.history_index>0,egui::Button::new("< Back")).clicked(){self.navigate_history(-1,&ctx);}
-        if ui.add_enabled(self.history_index+1<self.history.len(),egui::Button::new("Forward >")).clicked(){self.navigate_history(1,&ctx);}
-        if ui.add_enabled(!matches!(self.selected,Some(Node::Computer)),egui::Button::new("^ Up")).clicked(){self.navigate_up(&ctx);}
-        if ui.button("Refresh").clicked(){self.archive_cache.clear();if let Some(node)=self.selected.clone(){self.select(node,&ctx);}}
-    }
-    fn show_browser_pane(&mut self,ui:&mut egui::Ui,index:usize,active:bool) {
-        self.show_tabs(ui);
-        ui.horizontal_wrapped(|ui|{ui.strong(format!("Pane {}{}",index+1,if active{" · Active"}else{""}));self.show_navigation(ui);});
-        let current=self.selected.clone().unwrap_or(Node::Computer);let mut target=None;
-        egui::ScrollArea::horizontal().id_salt("pane_path").show(ui,|ui|{ui.horizontal(|ui|{
-            for (i,node) in current.breadcrumbs().into_iter().enumerate(){if i>0{ui.label("›");}
-                if ui.selectable_label(node==current,node.label()).clicked(){target=Some(node);}
-            }
-        });});
-        if let Some(node)=target{self.select(node,ui.ctx());}
-        ui.separator();ui.push_id(self.active_tab, |ui| self.show_gallery(ui));
-    }
+    fn show_navigation(&mut self,ui:&mut egui::Ui) {self.navigation_icons(ui);}
+    fn show_browser_pane(&mut self,ui:&mut egui::Ui,index:usize,active:bool) {self.pane_header(ui,index,active);}
     fn show_panes(&mut self,ui:&mut egui::Ui) {
         if !self.dual_panes {ui.push_id("single_browser",|ui|self.show_browser_pane(ui,0,true));return;}
         let rect=ui.available_rect_before_wrap();let split=rect.left()+rect.width()*self.pane_fraction;
@@ -1422,20 +1347,23 @@ impl App {
         let response=ui.interact(divider,ui.id().with("browser_split"),Sense::drag());
         if response.dragged(){self.pane_fraction=(self.pane_fraction+ui.ctx().input(|i|i.pointer.delta().x)/rect.width().max(1.0)).clamp(0.2,0.8);}
         response.on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
-        ui.painter().rect_filled(divider,0.0,Color32::from_gray(65));
-        if let Some(pos)=ui.ctx().input(|i|if i.pointer.any_pressed(){i.pointer.interact_pos()}else{None}) {
+        ui.painter().rect_filled(divider,0.0,ui_theme::BORDER);
+        if let Some(pos)=ui.ctx().input(|i|if i.pointer.any_pressed()||i.raw_scroll_delta.y!=0.0{i.pointer.hover_pos()}else{None}) {
             if left.contains(pos){self.switch_pane(0);}else if right.contains(pos){self.switch_pane(1);}
         }
         for (index,area) in [left,right].into_iter().enumerate(){
             let active=self.active_pane==index;
             ui.allocate_new_ui(egui::UiBuilder::new().max_rect(area),|ui|{ui.push_id(("browser_pane",index),|ui|{
-                egui::Frame::none().inner_margin(4.0).stroke(egui::Stroke::new(1.0_f32,if active{Color32::from_rgb(65,140,200)}else{Color32::from_gray(45)})).show(ui,|ui|{
+                ui.set_clip_rect(area.intersect(ui.clip_rect()));
+                egui::Frame::none().fill(ui_theme::PANEL).inner_margin(if self.settings.comfortable{12.0}else{8.0}).stroke(egui::Stroke::new(1.0_f32,if active{ui_theme::ACCENT.gamma_multiply(0.7)}else{ui_theme::BORDER})).show(ui,|ui|{
+                    ui.set_min_height(ui.available_height());
                     if active {self.show_browser_pane(ui,index,true);}else if let Some(other)=self.inactive.as_mut(){other.show_browser_pane(ui,index,false);}
                 });
             });});
         }
     }
     fn show_preview_content(&mut self, ui: &mut egui::Ui, pane: usize) {
+        if self.board.is_some() { self.show_image(ui); return; }
         ui.horizontal(|ui| {
             ui.strong(format!("Pane {}", pane + 1));
             if ui.small_button("Fit").clicked() { self.fit = true; }
@@ -1443,17 +1371,23 @@ impl App {
                 self.fit = false; self.zoom = 1.0; self.pan = Vec2::ZERO;
             }
         });
-        if let Some(image) = self.current.and_then(|index| self.images.get(index)) { ui.label(&image.label); }
-        self.show_video_controls(ui);
-        self.show_document_controls(ui);
+        if let Some(image) = self.current.and_then(|index| self.images.get(index)) { ui.add(egui::Label::new(RichText::new(&image.label).small().color(ui_theme::MUTED)).truncate()).on_hover_text(&image.label); }
         ui.separator();
+        if self.fullscreen || self.video.is_some() || self.pdf.is_some() {
+            egui::TopBottomPanel::bottom(ui.id().with("transport")).frame(egui::Frame::none().fill(ui_theme::PANEL).inner_margin(6.0)).show_inside(ui,|ui|{
+                self.show_video_controls(ui);self.show_document_controls(ui);if self.fullscreen {self.fullscreen_file_slider(ui);}
+            });
+        }
         self.show_image(ui);
     }
     fn show_preview_panel(&mut self, ui: &mut egui::Ui) {
+        if self.canvas.editor.is_some() { self.show_collection_preview(ui); return; }
         ui.horizontal(|ui| {
             ui.strong("Preview");
+            if ui.toggle_value(&mut self.settings.compare_fullscreen,"Pair fullscreen").on_hover_text("With split preview, double-click to compare Pane 1 on the left and Pane 2 on the right").changed(){self.save_preferences();}
             let mut split=self.split_preview;
-            if ui.toggle_value(&mut split, "Split preview").on_hover_text("Pane 1 above, Pane 2 below").changed() {
+            if ui_theme::button(ui,ui_theme::Icon::Preview,"Split preview · Pane 1 above, Pane 2 below",true,split).clicked() {
+                split=!split;
                 self.set_split_preview(split, ui.ctx());
                 self.save_preferences();
             }
@@ -1469,9 +1403,9 @@ impl App {
         let drag = ui.interact(divider, ui.id().with("preview_split"), Sense::drag());
         if drag.dragged() { self.preview_fraction=(self.preview_fraction + ui.ctx().input(|i| i.pointer.delta().y)/rect.height().max(1.0)).clamp(0.2,0.8); }
         drag.on_hover_cursor(egui::CursorIcon::ResizeVertical);
-        ui.painter().rect_filled(divider,0.0,Color32::from_gray(65));
+        ui.painter().rect_filled(divider,0.0,ui_theme::BORDER);
         let areas = [Rect::from_min_max(rect.min,Pos2::new(rect.right(),y-3.0)), Rect::from_min_max(Pos2::new(rect.left(),y+3.0),rect.max)];
-        if let Some(pos)=ui.ctx().input(|i| if i.pointer.any_pressed(){i.pointer.interact_pos()}else{None}) {
+        if let Some(pos)=ui.ctx().input(|i| if i.pointer.any_pressed()||i.raw_scroll_delta.y!=0.0{i.pointer.hover_pos()}else{None}) {
             for (index, area) in areas.iter().enumerate() { if area.contains(pos) { self.switch_pane(index); } }
         }
         for (index,area) in areas.into_iter().enumerate() {
@@ -1487,7 +1421,7 @@ impl App {
         }
     }
     fn set_split_preview(&mut self, enabled: bool, ctx: &egui::Context) {
-        self.split_preview=enabled;
+        self.split_preview=enabled;self.settings.split_preview=enabled;
         if enabled {self.set_dual(true,ctx);}
         else if let Some(other)=self.inactive.as_mut() {
             if let Some(player)=&mut other.video {player.pause();}
@@ -1498,12 +1432,22 @@ impl App {
 
 impl eframe::App for App {
     fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
+        if let Some(board)=&self.canvas.editor {let _=board.flush();}
+        if let Some(board)=&self.board {let _=board.flush();}
+        if let Some(ctx) = &self.render_context { media_gpu::shutdown(ctx); }
+        self.save_folder_view(true);
         for tab in &mut self.tabs { if let Some(state)=&mut tab.state {eframe::App::on_exit(state.as_mut(),gl);} }
         if let Some(gl)=gl {for renderer in self.retired_renderers.drain(..){if let Some(gpu)=renderer.lock().unwrap().take(){unsafe{gpu.destroy(gl);}}}}
         if let Some(other)=self.inactive.as_mut(){eframe::App::on_exit(other.as_mut(),gl);}
         if let Some(gl) = gl { if let Some(gpu) = self.model_renderer.lock().unwrap().take() { unsafe { gpu.destroy(gl); } } }
     }
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if std::env::var_os("VIEW_CALIPERS_GPU_DIAGNOSTICS").is_some() {ctx.send_viewport_cmd(egui::ViewportCommand::Close);return;}
+        self.receive_external_images(ctx,_frame);
+        media_gpu::collect(ctx);
+        self.tick_boards(ctx);
+        self.process_board_source_request(ctx);
+        self.render_context = Some(ctx.clone());
         if let Some(other)=self.inactive.as_mut(){self.retired_renderers.append(&mut other.retired_renderers);}
         if let Some(gl)=_frame.gl() {for renderer in self.retired_renderers.drain(..){if let Some(gpu)=renderer.lock().unwrap().take(){unsafe{gpu.destroy(gl);}}}}
         if let Some(path)=std::env::var_os("ARCHVIEW_UI_CAPTURE") {
@@ -1512,43 +1456,56 @@ impl eframe::App for App {
             let screenshot=ctx.input(|i|i.events.iter().find_map(|event|if let egui::Event::Screenshot{image,..}=event{Some(image.clone())}else{None}));
             if let Some(image)=screenshot {
                 let pixels:Vec<u8>=image.pixels.iter().flat_map(|color|color.to_array()).collect();
-                if let Some(image)=image::RgbaImage::from_raw(image.size[0] as u32,image.size[1] as u32,pixels){let _=image.save(path);}
+                if let Some(image)=image::RgbaImage::from_raw(image.size[0] as u32,image.size[1] as u32,pixels){if image.save(path).is_ok() && std::env::var_os("VIEW_CALIPERS_CAPTURE_CLOSE").is_some(){ctx.send_viewport_cmd(egui::ViewportCommand::Close);}}
             } else if START.get_or_init(std::time::Instant::now).elapsed().as_secs_f32()>2.0 && !REQUESTED.swap(true,AtomicOrdering::Relaxed) {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
             } else {ctx.request_repaint_after(std::time::Duration::from_millis(100));}
         }
-        if !self.settings_initialized {self.settings_initialized=true;self.apply_preferences(ctx);}
+        if !self.settings_initialized {self.settings_initialized=true;ui_theme::install_fonts(ctx);self.pane_fraction=self.settings.pane_fraction;self.preview_fraction=self.settings.preview_fraction;self.split_preview=self.split_preview||self.settings.split_preview;self.apply_preferences(ctx);}
+        if !self.settings_open && ctx.input(|i|i.modifiers.ctrl && i.key_pressed(Key::F)){self.files.search.focus=true;}
+        self.poll_collection(ctx);
+        if let Some(other)=self.inactive.as_mut(){other.poll_collection(ctx);}
         self.poll_media(ctx);
         if let Some(other)=self.inactive.as_mut(){other.poll_media(ctx);}
+        self.collection_settings(ctx);
         let settings_were_open=self.settings_open;
         if self.settings_open {
             if self.settings.window(ctx,&mut self.settings_open,&mut self.key_capture,&mut self.settings_message){self.apply_preferences(ctx);self.save_preferences();}
         }
-        if !settings_were_open && ctx.input(|i| i.key_pressed(Key::Escape)) {
+        if !settings_were_open && !self.workbench.palette && ctx.input(|i| i.key_pressed(Key::Escape)) {
             if self.fullscreen { self.set_fullscreen(ctx, false); }
             self.gallery = true;
         }
         // отложенное открытие (стартовый путь / drag&drop / диалог)
         if let Some(p) = self.pending_open.take() {
             self.open_path(&p, ctx);
-            if std::env::var_os("ARCHVIEW_UI_CAPTURE").is_some() && std::env::var("ARCHVIEW_UI_CHECK").is_ok_and(|mode|mode.contains("split")) {
+            if std::env::var_os("ARCHVIEW_UI_CAPTURE").is_some() && std::env::var("ARCHVIEW_UI_CHECK").is_ok_and(|mode|mode.contains("collection")) {
+                let paths=self.files.rows.iter().filter_map(|r|r.path.clone()).collect::<Vec<_>>();
+                if let Ok(id)=collections::create("Reference collection with a long unabridged name",&paths){self.open_collection_board(&id,ctx);if let Some(editor)=&mut self.canvas.editor{editor.fit();}self.goto(0,ctx);}
+            }
+            if std::env::var_os("ARCHVIEW_UI_CAPTURE").is_some() && std::env::var("ARCHVIEW_UI_CHECK").is_ok_and(|mode|mode.contains("search")) {
+                self.files.search.scope=2;self.files.search.kind=1;self.submit_search(ctx);
+            }
+            if std::env::var_os("ARCHVIEW_UI_CAPTURE").is_some() && std::env::var("ARCHVIEW_UI_CHECK").is_ok_and(|mode|mode.contains("preview")||mode.contains("split")) {
                 self.goto(0,ctx);self.new_tab(true,ctx);self.tabs[0].locked=true;
                 if let Some(other)=self.inactive.as_mut(){other.goto(other.images.len().saturating_sub(1),ctx);}
+                if std::env::var("ARCHVIEW_UI_CHECK").is_ok_and(|mode|mode.contains("paired")){self.settings.compare_fullscreen=true;self.set_fullscreen(ctx,true);}
             }
+            self.workspace_capture(ctx);
         }
         let dropped: Vec<PathBuf> =
             ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).collect());
-        if let Some(p) = dropped.first() {
-            self.open_path(p, ctx);
-        }
+        if !self.board_dropped_files(&dropped,ctx) { if let Some(p) = dropped.first() { self.open_path(p, ctx); } }
 
-        if !settings_were_open && !ctx.wants_keyboard_input() {
+        if !settings_were_open && !self.fullscreen && ctx.input(|i|i.modifiers.ctrl&&i.modifiers.shift&&i.key_pressed(Key::P)){self.open_palette();}
+        if self.board_focus() && !ctx.wants_keyboard_input() && self.settings.pressed(Action::Fullscreen,ctx) {if self.canvas.editor.as_ref().is_some_and(board::Editor::owns_keyboard){self.canvas.fullscreen=!self.canvas.fullscreen;ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.canvas.fullscreen));}else{self.set_fullscreen(ctx,!self.fullscreen);}}
+        if !self.board_focus() && !settings_were_open && !self.workspace_modal() && !self.workbench.palette && !ctx.wants_keyboard_input() {
             if self.settings.pressed(Action::Settings,ctx){self.open_settings();}
             else {
                 if self.settings.pressed(Action::Next,ctx) || self.settings.pressed(Action::NextAlternate,ctx){self.step(1,ctx);}
                 if self.settings.pressed(Action::Previous,ctx) || self.settings.pressed(Action::PreviousAlternate,ctx){self.step(-1,ctx);}
-                if self.settings.pressed(Action::First,ctx){if self.pdf.is_some(){self.load_pdf_page(0,ctx);}else{self.goto(0,ctx);}}
-                if self.settings.pressed(Action::Last,ctx){if let Some((_,_,count))=self.pdf.clone(){self.load_pdf_page(count-1,ctx);}else if !self.images.is_empty(){self.goto(self.images.len()-1,ctx);}}
+                if self.settings.pressed(Action::First,ctx){if self.pdf.is_some(){self.load_pdf_page(0,ctx);}else if let Some(index)=self.media_navigation().first().copied(){self.goto(index,ctx);}}
+                if self.settings.pressed(Action::Last,ctx){if let Some((_,_,count))=self.pdf.clone(){self.load_pdf_page(count-1,ctx);}else if let Some(index)=self.media_navigation().last().copied(){self.goto(index,ctx);}}
                 if self.settings.pressed(Action::Fit,ctx){self.fit=true;}
                 if self.settings.pressed(Action::ActualSize,ctx){self.fit=false;self.zoom=1.0;self.pan=Vec2::ZERO;}
                 if self.settings.pressed(Action::PlayPause,ctx){if let Some(player)=&mut self.video{if player.playing(){player.pause();}else if let Err(error)=player.play(ctx){self.status=format!("Video: {error}");}}}
@@ -1564,7 +1521,15 @@ impl eframe::App for App {
                 if self.settings.pressed(Action::LockTab,ctx){self.tabs[self.active_tab].locked=!self.tabs[self.active_tab].locked;}
             }
         }
+        navigation_benchmark::tick(self, ctx);
+        if self.canvas.fullscreen { self.show_collection_fullscreen(ctx); return; }
         if self.fullscreen {
+            if self.workbench.paired_fullscreen {
+                egui::TopBottomPanel::bottom("paired_fullscreen_bar").show(ctx,|ui|{ui.horizontal(|ui|{if ui.button("Exit fullscreen (Esc)").clicked(){self.set_fullscreen(ctx,false);}ui.label("Pane 1 · left   /   Pane 2 · right   ·   Wheel: browse files   ·   Ctrl+wheel: zoom");});});
+                egui::CentralPanel::default().frame(egui::Frame::none().fill(ui_theme::BACKGROUND)).show(ctx,|ui|self.show_paired_fullscreen(ui));
+                self.process_fullscreen_request(ctx);
+                return;
+            }
             egui::TopBottomPanel::bottom("fullscreen_controls").show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     if ui.button("Exit fullscreen (Esc)").clicked() { self.set_fullscreen(ctx, false); }
@@ -1574,121 +1539,65 @@ impl eframe::App for App {
                 });
                 self.show_video_controls(ui);
                 self.show_document_controls(ui);
+                if self.board.is_none() { self.fullscreen_file_slider(ui); }
             });
             egui::CentralPanel::default().frame(egui::Frame::none())
                 .show(ctx, |ui| self.show_image(ui));
+            self.process_fullscreen_request(ctx);
             return;
         }
 
-        egui::TopBottomPanel::top("bar").show(ctx, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                self.show_navigation(ui);
-                if ui.selectable_label(self.dual_panes,"Dual panes").clicked(){self.set_dual(!self.dual_panes,ctx);self.save_preferences();}
-                if ui.button("Settings…").clicked(){self.open_settings();}
-                ui.separator();
-                if ui.button("This PC").clicked() {
-                    self.select(Node::Computer, ctx);
-                }
-                if ui.button("Open folder…").clicked() {
-                    if let Some(p) = rfd::FileDialog::new().pick_folder() {
-                        self.pending_open = Some(p);
-                    }
-                }
-                if ui.button("Open archive…").clicked() {
-                    if let Some(p) = rfd::FileDialog::new()
-                        .add_filter("archives", ARCHIVE_EXT)
-                        .pick_file()
-                    {
-                        self.pending_open = Some(p);
-                    }
-                }
-                if ui.button("Open image…").clicked() {
-                    if let Some(p) = rfd::FileDialog::new()
-                        .add_filter("Images", IMAGE_EXT)
-                        .pick_file()
-                    {
-                        self.pending_open = Some(p);
-                    }
-                }
-                if ui.button("Open video…").clicked() {
-                    if let Some(path) = rfd::FileDialog::new().add_filter("Video", VIDEO_EXT).pick_file() {
-                        self.pending_open = Some(path);
-                    }
-                }
-                if ui.button("Open 3D…").clicked() {
-                    if let Some(path) = rfd::FileDialog::new().add_filter("3D models", model3d::EXTENSIONS).pick_file() { self.pending_open = Some(path); }
-                }
-                if ui.button("Open document…").clicked() {
-                    if let Some(path) = rfd::FileDialog::new().add_filter("PDF / Markdown", DOCUMENT_EXT).pick_file() {
-                        self.pending_open = Some(path);
-                    }
-                }
-                ui.separator();
-                if ui.button("Thumbnails").clicked() { self.gallery = true; }
+        egui::TopBottomPanel::top("bar").frame(egui::Frame::none().fill(ui_theme::PANEL).inner_margin(egui::Margin::symmetric(12.0,8.0))).show(ctx,|ui|self.app_bar(ui));
+        egui::TopBottomPanel::bottom("status").frame(egui::Frame::none().fill(ui_theme::BACKGROUND).inner_margin(egui::Margin::symmetric(12.0,5.0))).show(ctx,|ui|{
+            ui.horizontal(|ui|{let (selected,total)=self.file_counts();ui.small(format!("{} items{}",total,if selected>0{format!(" · {selected} selected")}else{String::new()}));
+                if self.file_job.is_some(){ui.spinner();}
+                let message=if self.file_message.is_empty(){&self.status}else{&self.file_message};ui.add(egui::Label::new(RichText::new(message.lines().next().unwrap_or("")).small().color(ui_theme::MUTED)).truncate()).on_hover_text(message);
             });
-            ui.separator();
-            let current = self.selected.clone().unwrap_or(Node::Computer);
-            let breadcrumbs = current.breadcrumbs();
-            let mut destination = None;
-            egui::ScrollArea::horizontal().id_salt("path_breadcrumbs")
-                .auto_shrink([false, true]).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        for (index, node) in breadcrumbs.iter().enumerate() {
-                            if index > 0 { ui.label(RichText::new("›").weak()); }
-                            let response = ui.selectable_label(node == &current, node.label());
-                            if response.clicked() { destination = Some(node.clone()); }
-                            response.on_hover_text(match node {
-                                Node::Dir(path) | Node::Archive(path) => path.display().to_string(),
-                                Node::ArchiveDir { archive, prefix } => format!("{} / {}", archive.display(), prefix),
-                                Node::Computer => "This PC".into(),
-                            });
-                        }
-                    });
-                });
-            if let Some(node) = destination { self.select(node, ctx); }
-        });
-        egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
-            ui.label(RichText::new(&self.status).small());
         });
 
+        let previous_layout=(self.settings.tree_width,self.settings.preview_width,self.settings.pane_fraction,self.settings.preview_fraction);
         let mut tree_click: Option<Node> = None;
 
-        egui::SidePanel::left("tree")
-            .resizable(true)
-            .default_width(300.0)
+        if self.settings.show_tree && !self.settings.review {let tree=egui::SidePanel::left("tree")
+            .resizable(true).min_width(160.0)
+            .default_width(self.settings.tree_width)
             .show(ctx, |ui| {
                 let bookmark_click = egui::TopBottomPanel::bottom("bookmarks")
                     .resizable(true).default_height(200.0).min_height(80.0)
                     .show_inside(ui, |ui| self.show_bookmarks(ui)).inner;
                 if bookmark_click.is_some() { tree_click = bookmark_click; }
                 ui.horizontal(|ui| {
-                    ui.strong("Folders and archives");
+                    ui.strong("Folders");
                     if ui.small_button("Collapse all").clicked() {
                         self.expanded.clear();
                     }
                 });
                 ui.separator();
-                egui::ScrollArea::both().id_salt("tree_scroll").auto_shrink([false, false]).show(ui, |ui| {
+                egui::ScrollArea::vertical().id_salt("tree_scroll").auto_shrink([false, false]).show(ui, |ui| {
                     let root = Node::Computer;
                     if let Some(node) = self.show_tree(ui, &root, 0) { tree_click = Some(node); }
                 });
             });
+            self.settings.tree_width=tree.response.rect.width();}
 
         if let Some(n) = tree_click {
             self.select(n, ctx);
         }
 
-        egui::SidePanel::right("preview")
-            .resizable(true).default_width(400.0).min_width(180.0)
-            .show(ctx, |ui| {
-                self.show_preview_panel(ui);
-            });
-
-        egui::CentralPanel::default()
-            .frame(egui::Frame::none())
-            .show(ctx, |ui| {
-                self.show_panes(ui);
-            });
+        if self.settings.review && self.canvas.editor.is_none() {
+            egui::TopBottomPanel::bottom("review_filmstrip").resizable(true).default_height(92.0).show(ctx,|ui|self.filmstrip(ui));
+            egui::CentralPanel::default().frame(egui::Frame::none().fill(ui_theme::BACKGROUND).inner_margin(12.0)).show(ctx,|ui|self.show_preview_content(ui,self.active_pane));
+        }else{
+            if self.settings.show_preview || self.canvas.editor.is_some() {let preview=egui::SidePanel::right("preview").resizable(true).default_width(self.settings.preview_width).min_width(200.0).show(ctx,|ui|self.show_preview_panel(ui));self.settings.preview_width=preview.response.rect.width();}
+            egui::CentralPanel::default().frame(egui::Frame::none().fill(ui_theme::BACKGROUND).inner_margin(6.0)).show(ctx,|ui|self.show_panes(ui));
+        }
+        self.process_fullscreen_request(ctx);
+        self.palette(ctx);
+        self.settings.pane_fraction=self.pane_fraction;self.settings.preview_fraction=self.preview_fraction;
+        self.workbench.layout_dirty|=previous_layout!=(self.settings.tree_width,self.settings.preview_width,self.settings.pane_fraction,self.settings.preview_fraction);
+        if self.workbench.layout_dirty && ctx.input(|i|i.pointer.any_released()){self.save_preferences();self.workbench.layout_dirty=false;}
+        self.file_commands(ctx);
+        self.workspace_window(ctx);
         let gpu=video::GPU.load(AtomicOrdering::Relaxed);
         if self.settings.thumb_size!=self.thumb_size || self.settings.cache!=self.cache_thumbnails || self.settings.gpu!=gpu {
             self.settings.thumb_size=self.thumb_size;self.settings.cache=self.cache_thumbnails;self.settings.gpu=gpu;self.save_preferences();
@@ -1697,20 +1606,20 @@ impl eframe::App for App {
 }
 
 fn main() -> eframe::Result<()> {
-    let start = std::env::args().nth(1).map(PathBuf::from);
+    let start = std::env::var_os("VIEW_CALIPERS_BENCH_FOLDER").map(PathBuf::from).or_else(|| std::env::args().nth(1).map(PathBuf::from));
     let options = eframe::NativeOptions {
         depth_buffer: 24,
         renderer: eframe::Renderer::Glow,
         viewport: egui::ViewportBuilder::default()
             .with_title("view-calipers")
-            .with_inner_size([1400.0, 900.0])
-            .with_drag_and_drop(true),
+            .with_inner_size(if std::env::var_os("VIEW_CALIPERS_BENCH_FOLDER").is_some(){[1600.0,1000.0]}else if std::env::var("ARCHVIEW_UI_CHECK").is_ok_and(|mode|mode.contains("narrow")){[1050.0,800.0]}else{[1400.0,900.0]})
+            .with_drag_and_drop(false),
         ..Default::default()
     };
     eframe::run_native(
         "view-calipers",
         options,
-        Box::new(move |_cc| {let mut app=App::new(start);app.settings=settings::Settings::load();if std::env::var_os("ARCHVIEW_UI_CAPTURE").is_some(){if let Ok(mode)=std::env::var("ARCHVIEW_UI_CHECK"){app.settings.dual=mode.contains("dual")||mode.contains("split");app.split_preview=mode.contains("split");app.settings_open=mode.contains("settings");}}Ok(Box::new(app))}),
+        Box::new(move |_cc| {media_gpu::install(&_cc.egui_ctx, _cc.gl.as_ref());if let Some(path)=std::env::var_os("VIEW_CALIPERS_GPU_DIAGNOSTICS"){media_gpu::run_diagnostics(&_cc.egui_ctx,Path::new(&path));}let mut app=App::new(start);app.render_context=Some(_cc.egui_ctx.clone());app.settings=settings::Settings::load();if std::env::var_os("ARCHVIEW_UI_CAPTURE").is_some(){if let Ok(mode)=std::env::var("ARCHVIEW_UI_CHECK"){app.settings.dual=mode.contains("dual")||mode.contains("split");app.split_preview=mode.contains("split");app.settings_open=mode.contains("settings");if mode.contains("palette"){app.open_palette();}app.files.details=mode.contains("details");app.settings.comfortable=mode.contains("comfortable");app.settings.review=mode.split_whitespace().any(|flag|flag=="review");}}Ok(Box::new(app))}),
     )
 }
 
@@ -1730,13 +1639,13 @@ mod tests {
             assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
         }
         let ctx=egui::Context::default();let mut app=App::new(None);
-        app.select(Node::Dir(left.clone()),&ctx);app.goto(0,&ctx);
+        app.select(Node::Dir(left.clone()),&ctx);app.goto(0,&ctx);app.wait_photo(&ctx);
         app.set_split_preview(true,&ctx);
         app.video.as_mut().unwrap().muted=true;
         app.video.as_mut().unwrap().play(&ctx).unwrap();
         app.switch_pane(1);
         assert!(app.inactive.as_ref().unwrap().video.as_ref().unwrap().playing());
-        app.select(Node::Dir(right),&ctx);app.goto(0,&ctx);
+        app.select(Node::Dir(right),&ctx);app.goto(0,&ctx);app.wait_photo(&ctx);
         app.video.as_mut().unwrap().muted=true;
         app.video.as_mut().unwrap().play(&ctx).unwrap();
         let deadline=std::time::Instant::now()+std::time::Duration::from_secs(8);
@@ -1774,10 +1683,10 @@ mod tests {
         image::RgbImage::new(24,12).save(left.join("left.png")).unwrap();
         image::RgbImage::new(12,24).save(right.join("right.png")).unwrap();
         let ctx=egui::Context::default();let mut app=App::new(None);
-        app.select(Node::Dir(left.clone()),&ctx);app.goto(0,&ctx);
+        app.select(Node::Dir(left.clone()),&ctx);app.goto(0,&ctx);app.wait_photo(&ctx);
         app.new_tab(true,&ctx);
         assert_eq!(app.tabs.len(),2);assert_eq!(app.current,Some(0));assert_eq!(app.tex_size,[24,12]);
-        app.select(Node::Dir(right.clone()),&ctx);app.goto(0,&ctx);
+        app.select(Node::Dir(right.clone()),&ctx);app.goto(0,&ctx);app.wait_photo(&ctx);
         app.switch_tab(0);assert_eq!(app.selected,Some(Node::Dir(left.clone())));assert_eq!(app.current,Some(0));assert_eq!(app.tex_size,[24,12]);
         app.tabs[0].locked=true;
         let history=app.history.clone();let history_index=app.history_index;
@@ -1822,7 +1731,7 @@ mod tests {
             assert!(cache.exists());
             assert_eq!(decode_thumbnail(&source, true).unwrap().pixels, thumbnail.pixels);
             app.images = vec![ImageRef { label: "portrait.jpg".into(), src: source }];
-            app.goto(0, &ctx);
+            app.goto(0, &ctx);app.wait_photo(&ctx);
             assert_eq!(app.tex_size, [16, 24]);
             app.set_fullscreen(&ctx, true);
             assert_eq!(app.tex_size, [16, 24]);
@@ -1840,8 +1749,8 @@ mod tests {
         image::RgbaImage::from_pixel(16,8,image::Rgba([255,0,0,255])).save(left.join("left.png")).unwrap();
         image::RgbaImage::from_pixel(8,16,image::Rgba([0,0,255,255])).save(right.join("right.png")).unwrap();
         let ctx=egui::Context::default();let mut app=App::new(None);
-        app.select(Node::Dir(left.clone()),&ctx);app.goto(0,&ctx);app.set_dual(true,&ctx);
-        app.switch_pane(1);app.select(Node::Dir(right.clone()),&ctx);app.goto(0,&ctx);
+        app.select(Node::Dir(left.clone()),&ctx);app.goto(0,&ctx);app.wait_photo(&ctx);app.set_dual(true,&ctx);
+        app.switch_pane(1);app.select(Node::Dir(right.clone()),&ctx);app.goto(0,&ctx);app.wait_photo(&ctx);
         assert_eq!(app.tex_size,[8,16]);
         app.switch_pane(0);assert_eq!(app.selected,Some(Node::Dir(left.clone())));assert_eq!(app.current,Some(0));assert_eq!(app.tex_size,[16,8]);
         app.navigate_history(-1,&ctx);assert_eq!(app.selected,Some(Node::Computer));
@@ -1886,7 +1795,7 @@ mod tests {
         app.select(Node::Dir(root.clone()), &ctx);
         assert_eq!(app.images.len(), 2);
         for _ in 0..2 { assert!(app.thumb_rx.as_ref().unwrap().recv_timeout(std::time::Duration::from_secs(15)).unwrap().1.is_ok()); }
-        app.goto(0, &ctx);
+        app.goto(0, &ctx);app.wait_photo(&ctx);
         assert_eq!(app.pdf.as_ref().unwrap().2, 2);
         let first = app.tex_size;
         app.load_pdf_page(1, &ctx);
@@ -1906,7 +1815,7 @@ mod tests {
         }
         assert_eq!(final_frame.expect("Final PDF scrub frame").size, first);
         assert_eq!(app.pdf.as_ref().unwrap().1, 1);
-        app.goto(1, &ctx);
+        app.goto(1, &ctx);app.wait_photo(&ctx);
         assert!(app.pdf.is_none());
         assert!(app.pdf_scrubber.is_none());
         assert!(app.markdown.as_ref().unwrap().starts_with("# Пример"));
@@ -2019,7 +1928,7 @@ mod tests {
         let directory = std::env::temp_dir().join(format!("archview-video-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.join("motion.mp4");
-        let output = video::command("ffmpeg").args(["-y", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=160x120:rate=24",
+        let output = video::command("ffmpeg").args(["-y", "-v", "error", "-f", "lavfi", "-i", "testsrc=size=160x120:rate=60",
             "-f", "lavfi", "-i", "sine=frequency=440", "-t", "1", "-c:v", "mpeg4", "-pix_fmt", "yuv420p", "-c:a", "aac"])
             .arg(&path).output().unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
@@ -2029,10 +1938,11 @@ mod tests {
         assert_eq!(app.images.len(), 1);
         let (_, thumbnail) = app.thumb_rx.as_ref().unwrap().recv_timeout(std::time::Duration::from_secs(10)).unwrap();
         assert!(thumbnail.is_ok());
-        app.goto(0, &ctx);
+        app.goto(0, &ctx);app.wait_photo(&ctx);
         assert!(app.texture.is_some());
         let player = app.video.as_mut().unwrap();
         assert!((player.duration - 1.0).abs() < 0.2);
+        assert!((player.fps - 60.0).abs() < 0.01);
         player.muted = true;
         player.play(&ctx).unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -2047,7 +1957,7 @@ mod tests {
         assert!(!player.playing());
         player.position = 0.5;
         assert!(video::poster(&path, player.position, 320, 240).is_ok());
-        let scrubber = video::Scrubber::new(path.clone(), ctx.clone());
+        let scrubber = video::Scrubber::new(path.clone(), player.frame_size, player.fps, ctx.clone());
         for i in 0..20 { scrubber.seek(i as f64 / 40.0); }
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let mut scrub_frame = None;
@@ -2192,7 +2102,7 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(5)).unwrap();
         assert_eq!(index, 0);
         assert_eq!(result.unwrap().size, [320, 240]);
-        app.goto(0, &egui::Context::default());
+        app.goto(0, &egui::Context::default());app.wait_photo(&egui::Context::default());
         assert!(app.gallery);
         assert!(app.texture.is_some());
         assert_eq!(app.current, Some(0));

@@ -1,38 +1,21 @@
-# Publishing v0.1.0
+# Publishing a release
 
-The project is prepared locally; no repository or release has been published yet.
+The public repository is [baborub/view-calipers](https://github.com/baborub/view-calipers). Publish from `main`; never force-push an existing release tag.
 
-1. Review README, LICENSE, THIRD_PARTY.md, the neutral screenshots, and the release notes.
-2. Run the full local suite with FFmpeg and Blender installed:
-   `cargo test --release --locked`.
-3. Generate release assets: `powershell -File scripts/package.ps1`.
-4. Initialize a repository in the project directory and inspect the staged files:
-
-   ```powershell
-   git init -b main
-   git add .
-   git diff --cached --stat
-   git commit -m "Prepare view-calipers v0.1.0"
-   ```
-
-5. Create an empty GitHub repository under `baborub/view-calipers`, without generating additional README or license files, then push:
+1. Set the version in Cargo.toml and Cargo.lock, update CHANGELOG.md and dependency notices, and add `docs/releases/vX.Y.Z.md`.
+2. Review screenshots and staged files. Keep local media, test output, build artifacts and abandoned frontend prototypes out of source control.
+3. Run the full local suite with FFmpeg and Blender installed: `cargo test --release --locked`.
+4. Build release assets with `powershell -File scripts/package.ps1`. Extract the ZIP into a clean directory, verify its checksum and smoke-test the executable. The ZIP includes dependency notices; do not upload the EXE as a source file.
+5. Commit and push `main`, then wait for the Windows build workflow to pass. CI installs FFmpeg and tests video; Blender import tests run locally and are excluded from CI.
+6. Create an annotated version tag matching Cargo.toml and push it. For example:
 
    ```powershell
-   git remote add origin https://github.com/baborub/view-calipers.git
-   git push -u origin main
+   git tag -a v0.5.0 -m "view-calipers v0.5.0"
+   git push origin v0.5.0
    ```
 
-6. Wait for the Windows CI build to pass. Create and push the version tag:
+The tag workflow builds and packages that exact commit and creates a **draft** release with the versioned notes, Windows x64 ZIP and SHA256SUMS.txt. Review the draft and assets, then publish it and mark it as the latest release. The workflow never publishes a draft automatically.
 
-   ```powershell
-   git tag -a v0.1.0 -m "view-calipers v0.1.0"
-   git push origin v0.1.0
-   ```
+For an authorized manual fallback, attach only the current version's ZIP and matching SHA256SUMS.txt from `dist` and use the versioned notes file. Verify the remote tag matches the tested source commit before publishing.
 
-The tag workflow builds and packages the app, then creates a **draft** GitHub release with notes and assets. Open that draft, review it, and publish when ready. The workflow never automatically publishes the draft.
-
-For a manual release instead, attach the ZIP and SHA256SUMS.txt from `dist`, and paste `docs/releases/v0.1.0.md` into the release description. Do not upload the application EXE as a source file; the ZIP includes license notices.
-
-Use `docs/REPOSITORY_ABOUT.md` for the repository description and topics. The ignore rules exclude the existing local `files/`, `files.zip`, root EXEs, screenshots, and build outputs; they do not delete those files.
-
-Before the next release, update Cargo.toml / Cargo.lock, CHANGELOG.md, license notices, and add `docs/releases/vX.Y.Z.md`. Tag and package versions must match.
+Use `docs/REPOSITORY_ABOUT.md` for the repository description and topics. The `.gitignore` rules preserve local files while excluding them from publication.

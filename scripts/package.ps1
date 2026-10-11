@@ -22,6 +22,14 @@ try {
         foreach ($file in @('README.md','LICENSE','THIRD_PARTY.md','UnRAR-LICENSE.txt','CHANGELOG.md')) {
             Copy-Item -LiteralPath (Join-Path $packageRoot $file) -Destination $stage
         }
+        $docs = Join-Path $stage 'docs'
+        New-Item -ItemType Directory -Path $docs | Out-Null
+        Copy-Item -LiteralPath (Join-Path $packageRoot 'docs/MEDIA_PERFORMANCE.md') -Destination $docs
+        Copy-Item -LiteralPath (Join-Path $packageRoot 'docs/REFERENCE_BOARDS.md') -Destination $docs
+        $images = Join-Path $docs 'images'
+        New-Item -ItemType Directory -Path $images | Out-Null
+        Copy-Item -LiteralPath (Join-Path $packageRoot 'docs/images/workbench.png') -Destination $images
+        Copy-Item -LiteralPath (Join-Path $packageRoot 'docs/images/collection-canvas.png') -Destination $images
         Copy-Item -LiteralPath (Join-Path $packageRoot 'licenses') -Destination $stage -Recurse
         $zip = Join-Path $dist "$name.zip"
         Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -Force
