@@ -397,5 +397,20 @@ fn video_and_markdown_drag_from_either_pane_and_create_from_selection() {
         .unwrap();
     }
     assert!(movie.is_file() && notes.is_file());
-    std::fs::remove_dir_all(root).unwrap();
+    // Cancelling a canvas does not block the UI on its in-flight poster probe.
+    // On Windows, allow that FFmpeg process to release the synthetic video
+    // before removing the fixture; unexpected errors still fail immediately.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match std::fs::remove_dir_all(&root) {
+            Ok(()) => break,
+            Err(error)
+                if matches!(error.raw_os_error(), Some(32 | 33))
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Err(error) => panic!("Cannot remove media fixture: {error}"),
+        }
+    }
 }

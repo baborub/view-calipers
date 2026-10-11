@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.1 — 2026-10-11
+
+- Stabilize collection and image-cache tests under parallel execution, and wait for background video probes to release temporary fixtures before cleanup on Windows.
+- Update release documentation, feature screenshots, packaging and CI video coverage. This is the first published build of the 0.5 series.
+
 ## 0.5.0 — 2026-10-11
 
 - Add reference-canvas arrangement tools: pack, grid, row/column, edge/center alignment, equal width/height/area and adjustable spacing. Whole groups retain their internal arrangement.

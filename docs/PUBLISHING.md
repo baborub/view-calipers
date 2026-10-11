@@ -10,8 +10,8 @@ The public repository is [baborub/view-calipers](https://github.com/baborub/view
 6. Create an annotated version tag matching Cargo.toml and push it. For example:
 
    ```powershell
-   git tag -a v0.5.0 -m "view-calipers v0.5.0"
-   git push origin v0.5.0
+   git tag -a v0.5.1 -m "view-calipers v0.5.1"
+   git push origin v0.5.1
    ```
 
 The tag workflow builds and packages that exact commit and creates a **draft** release with the versioned notes, Windows x64 ZIP and SHA256SUMS.txt. Review the draft and assets, then publish it and mark it as the latest release. The workflow never publishes a draft automatically.

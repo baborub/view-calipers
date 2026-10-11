@@ -1,6 +1,6 @@
 [package]
 name = "view-calipers"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 description = "Windows media browser with dual panes, tabs, and previews for images, video, documents, comics, and 3D."
 license = "MIT"

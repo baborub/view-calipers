@@ -31,7 +31,7 @@ Screenshots show the actual application with generated demonstration artwork.
 
 Download the Windows x64 ZIP from [Releases](https://github.com/baborub/view-calipers/releases), extract it, and run `view-calipers.exe`. No application installer is required.
 
-Current release: **[v0.5.0](https://github.com/baborub/view-calipers/releases/tag/v0.5.0)**. The application is unsigned. Release archives include license notices and a SHA-256 checksum.
+Current release: **[v0.5.1](https://github.com/baborub/view-calipers/releases/tag/v0.5.1)**. The application is unsigned. Release archives include license notices and a SHA-256 checksum.
 
 ### Requirements
 
