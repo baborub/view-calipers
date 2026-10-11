@@ -509,6 +509,9 @@ mod tests {
         cache.put(key.clone(), 3, 20);
         assert_eq!(cache.get(&second), Some(2));
         cache.configure(0);
+        assert_eq!((cache.used, cache.budget, cache.items.len()), (0, 0, 0));
+        cache.put(key.clone(), 4, 6);
+        assert!(cache.get(&key).is_none());
         assert_eq!(cache.used, 0);
         app.goto(0, &ctx);
         app.wait_photo(&ctx);
@@ -531,7 +534,13 @@ mod tests {
         app.goto(0, &ctx);
         app.wait_photo(&ctx);
         assert!(app.texture.is_some());
-        assert_eq!(stats(&ctx), (0, 0, 0, 0));
+        // The RAM LRU is process-wide: other parallel App tests legitimately
+        // reconfigure it. Its zero-budget policy is checked on the isolated LRU
+        // above; GPU caching belongs to this context and can be asserted here.
+        let gpu_cache = gpu(&ctx);
+        let gpu_cache = gpu_cache.lock().unwrap();
+        assert_eq!((gpu_cache.used, gpu_cache.budget, gpu_cache.items.len()), (0, 0, 0));
+        drop(gpu_cache);
         drop(app);
         std::fs::remove_dir_all(path).unwrap();
     }
